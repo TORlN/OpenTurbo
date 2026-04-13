@@ -1,6 +1,7 @@
 #include "../include/openturbo/c_api.h"
 #include "../include/openturbo/ggml_adapter.h"
 #include "../include/openturbo/llama_bridge.h"
+#include "../include/openturbo/llama_kv_shim.h"
 #include "scan_reference.hpp"
 
 #include <cuda_runtime.h>
@@ -50,6 +51,21 @@ namespace
         view.ne[1] = dim1;
         view.nb[0] = (element_type == OPENTURBO_GGML_TYPE_F32) ? 4u : OPENTURBO_PACKED_TILE_HEADER_BYTES;
         view.nb[1] = view.nb[0] * static_cast<uint64_t>(dim0);
+        return view;
+    }
+
+    openturbo_ggml_tensor_view_t make_contiguous_3d_view(void *data, uint32_t element_type, int64_t dim0, int64_t dim1, int64_t dim2)
+    {
+        openturbo_ggml_tensor_view_t view{};
+        view.data = data;
+        view.element_type = element_type;
+        view.n_dims = 3;
+        view.ne[0] = dim0;
+        view.ne[1] = dim1;
+        view.ne[2] = dim2;
+        view.nb[0] = (element_type == OPENTURBO_GGML_TYPE_F32) ? 4u : OPENTURBO_PACKED_TILE_HEADER_BYTES;
+        view.nb[1] = view.nb[0] * static_cast<uint64_t>(dim0);
+        view.nb[2] = view.nb[1] * static_cast<uint64_t>(dim1);
         return view;
     }
 
@@ -173,6 +189,66 @@ int main()
             std::cerr << "ggml adapter encode produced an invalid header" << std::endl;
             break;
         }
+
+        std::array<float, OPENTURBO_TILE_DIMS * 2> host_input_by_head{};
+        std::memcpy(host_input_by_head.data(), host_input.data(), sizeof(float) * host_input.size());
+        float *device_input_by_head = nullptr;
+        openturbo_packed_tile_header_t *device_headers_by_head = nullptr;
+        std::array<openturbo_packed_tile_header_t, 2> host_headers_by_head{};
+        if (cudaMalloc(&device_input_by_head, sizeof(float) * host_input_by_head.size()) != cudaSuccess)
+        {
+            std::cerr << "cudaMalloc(device_input_by_head) failed" << std::endl;
+            break;
+        }
+        if (cudaMalloc(&device_headers_by_head, sizeof(openturbo_packed_tile_header_t) * host_headers_by_head.size()) != cudaSuccess)
+        {
+            cudaFree(device_input_by_head);
+            std::cerr << "cudaMalloc(device_headers_by_head) failed" << std::endl;
+            break;
+        }
+        if (cudaMemcpy(device_input_by_head, host_input_by_head.data(), sizeof(float) * host_input_by_head.size(), cudaMemcpyHostToDevice) != cudaSuccess)
+        {
+            cudaFree(device_headers_by_head);
+            cudaFree(device_input_by_head);
+            std::cerr << "cudaMemcpy multi-head encode input failed" << std::endl;
+            break;
+        }
+
+        const openturbo_ggml_tensor_view_t input_heads_view = make_contiguous_3d_view(device_input_by_head, OPENTURBO_GGML_TYPE_F32, OPENTURBO_TILE_DIMS, 1, 2);
+        const openturbo_ggml_tensor_view_t output_heads_view = make_contiguous_2d_view(device_headers_by_head, OPENTURBO_GGML_TYPE_PACKED_TILE_HEADER, 1, 2);
+        if (!check_status(
+                "openturbo_llama_encode_from_kv_heads",
+                openturbo_llama_encode_from_kv_heads(&input_heads_view, &output_heads_view, 0, 13, 10000.0f, stream_context, &cuda_status),
+                cuda_status))
+        {
+            cudaFree(device_headers_by_head);
+            cudaFree(device_input_by_head);
+            break;
+        }
+        if (cudaMemcpy(host_headers_by_head.data(), device_headers_by_head, sizeof(openturbo_packed_tile_header_t) * host_headers_by_head.size(), cudaMemcpyDeviceToHost) != cudaSuccess)
+        {
+            cudaFree(device_headers_by_head);
+            cudaFree(device_input_by_head);
+            std::cerr << "cudaMemcpy multi-head encode output failed" << std::endl;
+            break;
+        }
+        if (host_headers_by_head[0].reserved_u32 != 0u ||
+            (host_headers_by_head[0].quadrant_word_0 == 0ull && host_headers_by_head[0].quadrant_word_1 == 0ull))
+        {
+            cudaFree(device_headers_by_head);
+            cudaFree(device_input_by_head);
+            std::cerr << "llama KV shim encode produced an invalid head-local header" << std::endl;
+            break;
+        }
+        if (openturbo_llama_encode_from_kv_heads(&input_heads_view, &output_heads_view, 2, 13, 10000.0f, stream_context, &cuda_status) != OPENTURBO_STATUS_INVALID_ARGUMENT)
+        {
+            cudaFree(device_headers_by_head);
+            cudaFree(device_input_by_head);
+            std::cerr << "llama KV shim encode did not reject invalid head index" << std::endl;
+            break;
+        }
+        cudaFree(device_headers_by_head);
+        cudaFree(device_input_by_head);
 
         std::array<float, OPENTURBO_TILE_DIMS> host_query{};
         std::array<std::array<float, OPENTURBO_TILE_DIMS>, 2> host_cache{};
@@ -564,6 +640,124 @@ int main()
             std::cerr << "llama bridge did not reject mismatched cache token count" << std::endl;
             break;
         }
+
+        std::array<openturbo_packed_tile_header_t, 4> multi_query_headers_by_head{};
+        std::array<openturbo_packed_tile_header_t, 8> multi_cache_headers_by_head{};
+        std::array<float, 4> host_multi_head_scan_output{};
+        for (int tile = 0; tile < 2; ++tile)
+        {
+            multi_query_headers_by_head[tile] = multi_query_headers[tile];
+            multi_query_headers_by_head[2 + tile] = multi_query_headers[tile];
+            multi_cache_headers_by_head[tile] = multi_cache_headers[tile];
+            multi_cache_headers_by_head[2 + tile] = multi_cache_headers[2 + tile];
+            multi_cache_headers_by_head[4 + tile] = multi_cache_headers[tile];
+            multi_cache_headers_by_head[6 + tile] = multi_cache_headers[2 + tile];
+        }
+
+        openturbo_packed_tile_header_t *device_multi_query_headers_by_head = nullptr;
+        openturbo_packed_tile_header_t *device_multi_cache_headers_by_head = nullptr;
+        float *device_multi_head_scan_output = nullptr;
+        if (cudaMalloc(&device_multi_query_headers_by_head, sizeof(openturbo_packed_tile_header_t) * multi_query_headers_by_head.size()) != cudaSuccess)
+        {
+            cudaFree(device_multi_cache_headers);
+            cudaFree(device_multi_query_headers);
+            cudaFree(device_cache_headers);
+            cudaFree(device_query_header);
+            std::cerr << "cudaMalloc(device_multi_query_headers_by_head) failed" << std::endl;
+            break;
+        }
+        if (cudaMalloc(&device_multi_cache_headers_by_head, sizeof(openturbo_packed_tile_header_t) * multi_cache_headers_by_head.size()) != cudaSuccess)
+        {
+            cudaFree(device_multi_query_headers_by_head);
+            cudaFree(device_multi_cache_headers);
+            cudaFree(device_multi_query_headers);
+            cudaFree(device_cache_headers);
+            cudaFree(device_query_header);
+            std::cerr << "cudaMalloc(device_multi_cache_headers_by_head) failed" << std::endl;
+            break;
+        }
+        if (cudaMalloc(&device_multi_head_scan_output, sizeof(float) * host_multi_head_scan_output.size()) != cudaSuccess)
+        {
+            cudaFree(device_multi_cache_headers_by_head);
+            cudaFree(device_multi_query_headers_by_head);
+            cudaFree(device_multi_cache_headers);
+            cudaFree(device_multi_query_headers);
+            cudaFree(device_cache_headers);
+            cudaFree(device_query_header);
+            std::cerr << "cudaMalloc(device_multi_head_scan_output) failed" << std::endl;
+            break;
+        }
+        if (cudaMemcpy(device_multi_query_headers_by_head, multi_query_headers_by_head.data(), sizeof(openturbo_packed_tile_header_t) * multi_query_headers_by_head.size(), cudaMemcpyHostToDevice) != cudaSuccess ||
+            cudaMemcpy(device_multi_cache_headers_by_head, multi_cache_headers_by_head.data(), sizeof(openturbo_packed_tile_header_t) * multi_cache_headers_by_head.size(), cudaMemcpyHostToDevice) != cudaSuccess)
+        {
+            cudaFree(device_multi_head_scan_output);
+            cudaFree(device_multi_cache_headers_by_head);
+            cudaFree(device_multi_query_headers_by_head);
+            cudaFree(device_multi_cache_headers);
+            cudaFree(device_multi_query_headers);
+            cudaFree(device_cache_headers);
+            cudaFree(device_query_header);
+            std::cerr << "cudaMemcpy multi-head scan headers failed" << std::endl;
+            break;
+        }
+
+        const openturbo_ggml_tensor_view_t query_heads_view = make_contiguous_2d_view(device_multi_query_headers_by_head, OPENTURBO_GGML_TYPE_PACKED_TILE_HEADER, 2, 2);
+        const openturbo_ggml_tensor_view_t cache_heads_view = make_contiguous_3d_view(device_multi_cache_headers_by_head, OPENTURBO_GGML_TYPE_PACKED_TILE_HEADER, 2, 2, 2);
+        const openturbo_ggml_tensor_view_t output_heads_scan_view = make_contiguous_2d_view(device_multi_head_scan_output, OPENTURBO_GGML_TYPE_F32, 2, 2);
+        if (!check_status(
+                "openturbo_llama_scan_from_kv_cache",
+                openturbo_llama_scan_from_kv_cache(&query_heads_view, &cache_heads_view, &output_heads_scan_view, 0, 2, 2, stream_context, &cuda_status),
+                cuda_status))
+        {
+            cudaFree(device_multi_head_scan_output);
+            cudaFree(device_multi_cache_headers_by_head);
+            cudaFree(device_multi_query_headers_by_head);
+            cudaFree(device_multi_cache_headers);
+            cudaFree(device_multi_query_headers);
+            cudaFree(device_cache_headers);
+            cudaFree(device_query_header);
+            break;
+        }
+        if (cudaMemcpy(host_multi_head_scan_output.data(), device_multi_head_scan_output, sizeof(float) * host_multi_head_scan_output.size(), cudaMemcpyDeviceToHost) != cudaSuccess)
+        {
+            cudaFree(device_multi_head_scan_output);
+            cudaFree(device_multi_cache_headers_by_head);
+            cudaFree(device_multi_query_headers_by_head);
+            cudaFree(device_multi_cache_headers);
+            cudaFree(device_multi_query_headers);
+            cudaFree(device_cache_headers);
+            cudaFree(device_query_header);
+            std::cerr << "cudaMemcpy multi-head scan output failed" << std::endl;
+            break;
+        }
+        if (!check_close("llama KV shim multi-head scan[0]", host_multi_head_scan_output[0], expected_multi_tile_scan[0]) ||
+            !check_close("llama KV shim multi-head scan[1]", host_multi_head_scan_output[1], expected_multi_tile_scan[1]))
+        {
+            cudaFree(device_multi_head_scan_output);
+            cudaFree(device_multi_cache_headers_by_head);
+            cudaFree(device_multi_query_headers_by_head);
+            cudaFree(device_multi_cache_headers);
+            cudaFree(device_multi_query_headers);
+            cudaFree(device_cache_headers);
+            cudaFree(device_query_header);
+            break;
+        }
+        if (openturbo_llama_scan_from_kv_cache(&query_heads_view, &cache_heads_view, &output_heads_scan_view, 2, 2, 2, stream_context, &cuda_status) != OPENTURBO_STATUS_INVALID_ARGUMENT)
+        {
+            cudaFree(device_multi_head_scan_output);
+            cudaFree(device_multi_cache_headers_by_head);
+            cudaFree(device_multi_query_headers_by_head);
+            cudaFree(device_multi_cache_headers);
+            cudaFree(device_multi_query_headers);
+            cudaFree(device_cache_headers);
+            cudaFree(device_query_header);
+            std::cerr << "llama KV shim scan did not reject invalid head index" << std::endl;
+            break;
+        }
+
+        cudaFree(device_multi_head_scan_output);
+        cudaFree(device_multi_cache_headers_by_head);
+        cudaFree(device_multi_query_headers_by_head);
 
         cudaFree(device_multi_cache_headers);
         cudaFree(device_multi_query_headers);

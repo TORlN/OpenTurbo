@@ -55,6 +55,7 @@ if(OPENTURBO_BUILD_CUDA)
         kernels/openturbo_c_api.cu
         kernels/openturbo_ggml_adapter.cpp
         kernels/openturbo_llama_bridge.cpp
+        kernels/openturbo_llama_kv_shim.cpp
     )
 
     target_include_directories(openturbo_c_api
@@ -88,5 +89,5 @@ if(OPENTURBO_BUILD_CUDA)
         ARCHIVE DESTINATION openturbo
     )
 
-    install(FILES include/openturbo/c_api.h include/openturbo/ggml_adapter.h include/openturbo/llama_bridge.h DESTINATION include/openturbo)
+    install(FILES include/openturbo/c_api.h include/openturbo/ggml_adapter.h include/openturbo/llama_bridge.h include/openturbo/llama_kv_shim.h DESTINATION include/openturbo)
 endif()

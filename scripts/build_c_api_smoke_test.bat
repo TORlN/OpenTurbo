@@ -12,6 +12,7 @@ set "SCAN_CU=%WORKSPACE_DIR%\kernels\scan.cu"
 set "C_API_CU=%WORKSPACE_DIR%\kernels\openturbo_c_api.cu"
 set "GGML_ADAPTER_CPP=%WORKSPACE_DIR%\kernels\openturbo_ggml_adapter.cpp"
 set "LLAMA_BRIDGE_CPP=%WORKSPACE_DIR%\kernels\openturbo_llama_bridge.cpp"
+set "LLAMA_SHIM_CPP=%WORKSPACE_DIR%\kernels\openturbo_llama_kv_shim.cpp"
 set "SMOKE_TEST_CPP=%WORKSPACE_DIR%\kernels\c_api_smoke_test.cpp"
 
 if defined CUDA_PATH if exist "%CUDA_PATH%\bin\nvcc.exe" (
@@ -62,5 +63,5 @@ if not exist "%WORKSPACE_DIR%\build" (
 call "%VSDEVCMD%" -no_logo -arch=amd64 -host_arch=amd64
 if errorlevel 1 exit /b %errorlevel%
 
-"%NVCC%" -m64 -std=c++20 -arch=sm_89 -lineinfo -DOPENTURBO_CAPI_EXPORTS -I"%WORKSPACE_DIR%\include" -o "%OUTPUT%" "%ENCODER_CU%" "%SCAN_CU%" "%C_API_CU%" "%GGML_ADAPTER_CPP%" "%LLAMA_BRIDGE_CPP%" "%SMOKE_TEST_CPP%"
+"%NVCC%" -m64 -std=c++20 -arch=sm_89 -lineinfo -DOPENTURBO_CAPI_EXPORTS -I"%WORKSPACE_DIR%\include" -o "%OUTPUT%" "%ENCODER_CU%" "%SCAN_CU%" "%C_API_CU%" "%GGML_ADAPTER_CPP%" "%LLAMA_BRIDGE_CPP%" "%LLAMA_SHIM_CPP%" "%SMOKE_TEST_CPP%"
 exit /b %errorlevel%

@@ -12,7 +12,7 @@ What exists today:
 * A scan kernel that estimates query-cache dot products from packed headers, including the residual correction term.
 * CPU reference paths and smoke tests for the encoder and scan logic.
 * A Python extension build path using CMake and scikit-build-core.
-* A versioned native C ABI, a concrete head-local ggml-style adapter contract, and a llama-facing request bridge intended for future downstream integration.
+* A versioned native C ABI, a concrete head-local ggml-style adapter contract, a llama-facing request bridge, and a KV slicing shim for dense multi-head storage.
 
 What does not exist yet:
 
@@ -79,6 +79,7 @@ Important files:
 * `include/openturbo/c_api.h`: versioned public C ABI.
 * `include/openturbo/ggml_adapter.h`: concrete head-local KV tensor contract for downstream ggml slicing code.
 * `include/openturbo/llama_bridge.h`: dependency-free request layer matching the head-local downstream contract.
+* `include/openturbo/llama_kv_shim.h`: dense multi-head KV shim that slices one head into the bridge contract.
 * `src/openturbo/cuda_api.py`: raw pointer-based Python wrapper API.
 * `src/openturbo/tensor_api.py`: tensor-like Python wrapper layer.
 
@@ -146,6 +147,7 @@ The native side currently exposes:
 * `include/openturbo/c_api.h`: public ABI with explicit version and status codes.
 * `include/openturbo/ggml_adapter.h`: explicit ranked head-local adapter API.
 * `include/openturbo/llama_bridge.h`: a thin request-oriented bridge layer that downstream llama.cpp code can call after slicing real cache tensors into the head-local OpenTurbo views.
+* `include/openturbo/llama_kv_shim.h`: a downstream-oriented helper layer that slices dense `[... , num_heads]` KV storage into per-head bridge requests.
 
 The C ABI intentionally separates OpenTurbo status from raw CUDA status:
 
@@ -159,8 +161,8 @@ Local validation currently includes:
 
 * Encoder smoke test executable.
 * Scan smoke test executable.
-* Native C ABI smoke test executable covering encode plus both scan entry points.
-* Native failure-path checks for malformed head-local KV layouts, unsupported llama bridge layouts, and mismatched request counts.
+* Native C ABI smoke test executable covering encode, bridge calls, and dense multi-head KV shim calls.
+* Native failure-path checks for malformed head-local KV layouts, invalid shim head indices, unsupported llama bridge layouts, and mismatched request counts.
 * Python unit and smoke tests.
 
 GitHub Actions currently does the following:
@@ -176,7 +178,7 @@ This repo should currently be treated as a kernel and integration prototype.
 
 Known limitations:
 
-* The ggml-facing adapter still does not ingest raw ggml runtime tensors directly; downstream code must slice them into the head-local OpenTurbo views.
+* The ggml-facing adapter still does not ingest raw ggml runtime tensors directly; downstream code must provide either head-local views or dense tensors matching the shim contract.
 * The project is currently Windows-first for CUDA development.
 * The Python tensor layer uses duck typing and does not enforce a specific framework.
 * The packed-header format and ABI are still young enough that downstream integrations should treat them as evolving.
@@ -185,6 +187,6 @@ Known limitations:
 
 Likely next engineering steps are:
 
-1. Add a real llama.cpp-side shim that slices native ggml KV tensors into the frozen head-local OpenTurbo contract.
-2. Extend the bridge path from single head-local slices to full multi-head and sequence-aware integration flows.
-3. Add model-level validation and profiler-driven performance work once the downstream shim exists.
+1. Bind the dense KV shim to actual ggml tensor objects in a downstream llama.cpp integration tree.
+2. Extend the shim beyond single-head dispatch to batch multi-head and sequence-aware integration flows.
+3. Add model-level validation and profiler-driven performance work once the downstream shim is exercised in a real model path.
