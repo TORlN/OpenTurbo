@@ -32,8 +32,8 @@ extern "C"
      * - cache:  rank 3, type PACKED_TILE_HEADER, shape [num_query_tiles, num_cache_tokens, num_heads]
      * - output: rank 2, type F32, shape [num_cache_tokens, num_heads]
      *
-     * The shim slices one head index from these dense tensors and forwards the resulting
-     * head-local views into the lower-level llama bridge.
+     * The shim can either slice one head index from these dense tensors or iterate all
+     * heads and forward the resulting head-local views into the lower-level llama bridge.
      */
 
     OPENTURBO_CAPI openturbo_status_t openturbo_llama_encode_from_kv_heads(
@@ -50,6 +50,23 @@ extern "C"
         const openturbo_ggml_tensor_view_t *cache_headers_by_head,
         const openturbo_ggml_tensor_view_t *output_by_head,
         int head_index,
+        int num_query_tiles,
+        int num_cache_tokens,
+        openturbo_stream_context_t stream_context,
+        int *cuda_status_out);
+
+    OPENTURBO_CAPI openturbo_status_t openturbo_llama_encode_all_kv_heads(
+        const openturbo_ggml_tensor_view_t *input_heads,
+        const openturbo_ggml_tensor_view_t *output_headers_by_head,
+        int token_pos,
+        float rope_theta,
+        openturbo_stream_context_t stream_context,
+        int *cuda_status_out);
+
+    OPENTURBO_CAPI openturbo_status_t openturbo_llama_scan_all_kv_heads(
+        const openturbo_ggml_tensor_view_t *query_headers_by_head,
+        const openturbo_ggml_tensor_view_t *cache_headers_by_head,
+        const openturbo_ggml_tensor_view_t *output_by_head,
         int num_query_tiles,
         int num_cache_tokens,
         openturbo_stream_context_t stream_context,

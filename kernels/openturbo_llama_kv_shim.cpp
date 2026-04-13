@@ -249,3 +249,91 @@ extern "C" OPENTURBO_CAPI openturbo_status_t openturbo_llama_scan_from_kv_cache(
         OPENTURBO_LLAMA_LAYOUT_HEAD_LOCAL_KV_TILES_V1};
     return openturbo_llama_scan(&request, cuda_status_out);
 }
+
+extern "C" OPENTURBO_CAPI openturbo_status_t openturbo_llama_encode_all_kv_heads(
+    const openturbo_ggml_tensor_view_t *input_heads,
+    const openturbo_ggml_tensor_view_t *output_headers_by_head,
+    int token_pos,
+    float rope_theta,
+    openturbo_stream_context_t stream_context,
+    int *cuda_status_out)
+{
+    if (input_heads == nullptr || output_headers_by_head == nullptr)
+    {
+        return OPENTURBO_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (!is_encode_input_storage(*input_heads) ||
+        !is_encode_output_storage(*output_headers_by_head) ||
+        output_headers_by_head->ne[0] != input_heads->ne[1] ||
+        output_headers_by_head->ne[1] != input_heads->ne[2])
+    {
+        return OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT;
+    }
+
+    for (int64_t head_index = 0; head_index < input_heads->ne[2]; ++head_index)
+    {
+        const openturbo_status_t status = openturbo_llama_encode_from_kv_heads(
+            input_heads,
+            output_headers_by_head,
+            static_cast<int>(head_index),
+            token_pos,
+            rope_theta,
+            stream_context,
+            cuda_status_out);
+        if (status != OPENTURBO_STATUS_SUCCESS)
+        {
+            return status;
+        }
+    }
+
+    return OPENTURBO_STATUS_SUCCESS;
+}
+
+extern "C" OPENTURBO_CAPI openturbo_status_t openturbo_llama_scan_all_kv_heads(
+    const openturbo_ggml_tensor_view_t *query_headers_by_head,
+    const openturbo_ggml_tensor_view_t *cache_headers_by_head,
+    const openturbo_ggml_tensor_view_t *output_by_head,
+    int num_query_tiles,
+    int num_cache_tokens,
+    openturbo_stream_context_t stream_context,
+    int *cuda_status_out)
+{
+    if (query_headers_by_head == nullptr || cache_headers_by_head == nullptr || output_by_head == nullptr ||
+        num_query_tiles <= 0 || num_cache_tokens <= 0)
+    {
+        return OPENTURBO_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (!is_scan_query_storage(*query_headers_by_head) ||
+        !is_scan_cache_storage(*cache_headers_by_head) ||
+        !is_scan_output_storage(*output_by_head) ||
+        query_headers_by_head->ne[0] != num_query_tiles ||
+        cache_headers_by_head->ne[0] != num_query_tiles ||
+        cache_headers_by_head->ne[1] != num_cache_tokens ||
+        output_by_head->ne[0] != num_cache_tokens ||
+        cache_headers_by_head->ne[2] != query_headers_by_head->ne[1] ||
+        output_by_head->ne[1] != query_headers_by_head->ne[1])
+    {
+        return OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT;
+    }
+
+    for (int64_t head_index = 0; head_index < query_headers_by_head->ne[1]; ++head_index)
+    {
+        const openturbo_status_t status = openturbo_llama_scan_from_kv_cache(
+            query_headers_by_head,
+            cache_headers_by_head,
+            output_by_head,
+            static_cast<int>(head_index),
+            num_query_tiles,
+            num_cache_tokens,
+            stream_context,
+            cuda_status_out);
+        if (status != OPENTURBO_STATUS_SUCCESS)
+        {
+            return status;
+        }
+    }
+
+    return OPENTURBO_STATUS_SUCCESS;
+}

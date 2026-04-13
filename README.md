@@ -147,8 +147,8 @@ The native side currently exposes:
 * `include/openturbo/c_api.h`: public ABI with explicit version and status codes.
 * `include/openturbo/ggml_adapter.h`: explicit ranked head-local adapter API.
 * `include/openturbo/llama_bridge.h`: a thin request-oriented bridge layer that downstream llama.cpp code can call after slicing real cache tensors into the head-local OpenTurbo views.
-* `include/openturbo/llama_kv_shim.h`: a downstream-oriented helper layer that slices dense `[... , num_heads]` KV storage into per-head bridge requests.
-* `include/openturbo/ggml_downstream.hpp`: a header-only bridge that accepts real `ggml_tensor` objects once `ggml.h` is included downstream.
+* `include/openturbo/llama_kv_shim.h`: a downstream-oriented helper layer that slices dense `[... , num_heads]` KV storage into per-head or all-head bridge requests.
+* `include/openturbo/ggml_downstream.hpp`: a header-only bridge that accepts real `ggml_tensor` objects once `ggml.h` is included downstream, with both single-head and all-head entry points.
 
 The C ABI intentionally separates OpenTurbo status from raw CUDA status:
 
@@ -162,7 +162,7 @@ Local validation currently includes:
 
 * Encoder smoke test executable.
 * Scan smoke test executable.
-* Native C ABI smoke test executable covering encode, bridge calls, dense multi-head KV shim calls, and a mock `ggml_tensor` downstream binding path.
+* Native C ABI smoke test executable covering encode, bridge calls, dense multi-head KV shim calls, batched all-head dispatch, and a mock `ggml_tensor` downstream binding path.
 * Native failure-path checks for malformed head-local KV layouts, invalid shim head indices, unsupported llama bridge layouts, and mismatched request counts.
 * Python unit and smoke tests.
 
@@ -189,5 +189,5 @@ Known limitations:
 Likely next engineering steps are:
 
 1. Wire `include/openturbo/ggml_downstream.hpp` into an actual llama.cpp integration point that owns real `ggml_tensor` KV caches.
-2. Extend the shim beyond single-head dispatch to batch multi-head and sequence-aware integration flows.
+2. Extend the shim from all-head dispatch to sequence-aware integration flows that handle multiple tokens per launch site.
 3. Add model-level validation and profiler-driven performance work once the downstream bridge is exercised in a real model path.

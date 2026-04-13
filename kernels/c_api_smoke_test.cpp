@@ -243,6 +243,7 @@ int main()
 
         std::array<float, OPENTURBO_TILE_DIMS * 2> host_input_by_head{};
         std::memcpy(host_input_by_head.data(), host_input.data(), sizeof(float) * host_input.size());
+        std::memcpy(host_input_by_head.data() + OPENTURBO_TILE_DIMS, host_input.data(), sizeof(float) * host_input.size());
         float *device_input_by_head = nullptr;
         openturbo_packed_tile_header_t *device_headers_by_head = nullptr;
         std::array<openturbo_packed_tile_header_t, 2> host_headers_by_head{};
@@ -318,6 +319,41 @@ int main()
             cudaFree(device_headers_by_head);
             cudaFree(device_input_by_head);
             std::cerr << "ggml downstream encode did not reject non-f32 input" << std::endl;
+            break;
+        }
+
+        if (!check_status(
+                "openturbo_llama_encode_all_kv_heads",
+                openturbo_llama_encode_all_kv_heads(&input_heads_view, &output_heads_view, 13, 10000.0f, stream_context, &cuda_status),
+                cuda_status))
+        {
+            cudaFree(device_headers_by_head);
+            cudaFree(device_input_by_head);
+            break;
+        }
+        if (cudaMemcpy(host_headers_by_head.data(), device_headers_by_head, sizeof(openturbo_packed_tile_header_t) * host_headers_by_head.size(), cudaMemcpyDeviceToHost) != cudaSuccess)
+        {
+            cudaFree(device_headers_by_head);
+            cudaFree(device_input_by_head);
+            std::cerr << "cudaMemcpy multi-head encode-all output failed" << std::endl;
+            break;
+        }
+        if (host_headers_by_head[1].reserved_u32 != 0u ||
+            (host_headers_by_head[1].quadrant_word_0 == 0ull && host_headers_by_head[1].quadrant_word_1 == 0ull))
+        {
+            cudaFree(device_headers_by_head);
+            cudaFree(device_input_by_head);
+            std::cerr << "llama KV shim encode-all did not populate the second head" << std::endl;
+            break;
+        }
+
+        if (!check_status(
+                "openturbo::ggml_downstream::llama_encode_all_heads_from_ggml_tensors",
+                openturbo::ggml_downstream::llama_encode_all_heads_from_ggml_tensors(&ggml_input_heads, &ggml_output_heads, 13, 10000.0f, stream_context, &cuda_status),
+                cuda_status))
+        {
+            cudaFree(device_headers_by_head);
+            cudaFree(device_input_by_head);
             break;
         }
         cudaFree(device_headers_by_head);
@@ -858,6 +894,60 @@ int main()
             cudaFree(device_cache_headers);
             cudaFree(device_query_header);
             std::cerr << "ggml downstream scan did not reject non-f32 output" << std::endl;
+            break;
+        }
+
+        if (!check_status(
+                "openturbo_llama_scan_all_kv_heads",
+                openturbo_llama_scan_all_kv_heads(&query_heads_view, &cache_heads_view, &output_heads_scan_view, 2, 2, stream_context, &cuda_status),
+                cuda_status))
+        {
+            cudaFree(device_multi_head_scan_output);
+            cudaFree(device_multi_cache_headers_by_head);
+            cudaFree(device_multi_query_headers_by_head);
+            cudaFree(device_multi_cache_headers);
+            cudaFree(device_multi_query_headers);
+            cudaFree(device_cache_headers);
+            cudaFree(device_query_header);
+            break;
+        }
+        if (cudaMemcpy(host_multi_head_scan_output.data(), device_multi_head_scan_output, sizeof(float) * host_multi_head_scan_output.size(), cudaMemcpyDeviceToHost) != cudaSuccess)
+        {
+            cudaFree(device_multi_head_scan_output);
+            cudaFree(device_multi_cache_headers_by_head);
+            cudaFree(device_multi_query_headers_by_head);
+            cudaFree(device_multi_cache_headers);
+            cudaFree(device_multi_query_headers);
+            cudaFree(device_cache_headers);
+            cudaFree(device_query_header);
+            std::cerr << "cudaMemcpy multi-head scan-all output failed" << std::endl;
+            break;
+        }
+        if (!check_close("llama KV shim scan-all head1[0]", host_multi_head_scan_output[2], expected_multi_tile_scan[0]) ||
+            !check_close("llama KV shim scan-all head1[1]", host_multi_head_scan_output[3], expected_multi_tile_scan[1]))
+        {
+            cudaFree(device_multi_head_scan_output);
+            cudaFree(device_multi_cache_headers_by_head);
+            cudaFree(device_multi_query_headers_by_head);
+            cudaFree(device_multi_cache_headers);
+            cudaFree(device_multi_query_headers);
+            cudaFree(device_cache_headers);
+            cudaFree(device_query_header);
+            break;
+        }
+
+        if (!check_status(
+                "openturbo::ggml_downstream::llama_scan_all_heads_from_ggml_tensors",
+                openturbo::ggml_downstream::llama_scan_all_heads_from_ggml_tensors(&ggml_query_heads, &ggml_cache_heads, &ggml_scan_output_heads, 2, 2, stream_context, &cuda_status),
+                cuda_status))
+        {
+            cudaFree(device_multi_head_scan_output);
+            cudaFree(device_multi_cache_headers_by_head);
+            cudaFree(device_multi_query_headers_by_head);
+            cudaFree(device_multi_cache_headers);
+            cudaFree(device_multi_query_headers);
+            cudaFree(device_cache_headers);
+            cudaFree(device_query_header);
             break;
         }
 
