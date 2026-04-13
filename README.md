@@ -150,7 +150,7 @@ Local validation currently includes:
 
 * Encoder smoke test executable.
 * Scan smoke test executable.
-* Native C ABI smoke test executable.
+* Native C ABI smoke test executable covering encode plus both scan entry points.
 * Python unit and smoke tests.
 
 GitHub Actions currently does the following:
@@ -176,5 +176,5 @@ Known limitations:
 Likely next engineering steps are:
 
 1. Expand native smoke coverage to the scan-side C ABI entry points.
-2. Tighten the ggml adapter around exact KV-cache shape and stride contracts.
+2. Tighten the ggml adapter around exact KV-cache rank, count, and stride contracts.
 3. Add a real llama.cpp-side bridge layer once the adapter contract stabilizes.

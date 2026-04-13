@@ -1,10 +1,12 @@
+#define OPENTURBO_CAPI_EXPORTS
+
 #include "../include/openturbo/ggml_adapter.h"
 
 #include <stddef.h>
 
 namespace
 {
-    uint64_t packed_header_count(const openturbo_ggml_tensor_view_t &view)
+    uint64_t element_count(const openturbo_ggml_tensor_view_t &view)
     {
         uint64_t count = 1;
         for (int dim = 0; dim < view.n_dims; ++dim)
@@ -60,6 +62,11 @@ namespace
     {
         return stream_context.cuda_stream;
     }
+
+    bool has_exact_element_count(const openturbo_ggml_tensor_view_t &view, uint64_t expected_count)
+    {
+        return element_count(view) == expected_count;
+    }
 }
 
 extern "C" OPENTURBO_CAPI openturbo_status_t openturbo_ggml_encode(
@@ -82,14 +89,14 @@ extern "C" OPENTURBO_CAPI openturbo_status_t openturbo_ggml_encode(
         return OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT;
     }
 
-    const uint64_t input_elements = packed_header_count(*input);
+    const uint64_t input_elements = element_count(*input);
     if (input_elements == 0 || (input_elements % OPENTURBO_TILE_DIMS) != 0)
     {
         return OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT;
     }
 
     const uint64_t num_tiles = input_elements / OPENTURBO_TILE_DIMS;
-    if (packed_header_count(*output_headers) < num_tiles)
+    if (!has_exact_element_count(*output_headers, num_tiles))
     {
         return OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT;
     }
@@ -126,10 +133,10 @@ extern "C" OPENTURBO_CAPI openturbo_status_t openturbo_ggml_scan_query_many_cach
         return OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT;
     }
 
-    const uint64_t query_count = packed_header_count(*query_header);
-    const uint64_t cache_count = packed_header_count(*cache_headers);
-    const uint64_t output_count = packed_header_count(*output);
-    if (query_count < 1 || cache_count < 1 || output_count < cache_count)
+    const uint64_t cache_count = element_count(*cache_headers);
+    if (!has_exact_element_count(*query_header, 1) ||
+        cache_count == 0 ||
+        !has_exact_element_count(*output, cache_count))
     {
         return OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT;
     }
@@ -167,9 +174,9 @@ extern "C" OPENTURBO_CAPI openturbo_status_t openturbo_ggml_scan_query_many_cach
         return OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT;
     }
 
-    if (packed_header_count(*query_headers) < static_cast<uint64_t>(num_query_tiles) ||
-        packed_header_count(*cache_headers) < static_cast<uint64_t>(num_query_tiles) * static_cast<uint64_t>(num_cache_tokens) ||
-        packed_header_count(*output) < static_cast<uint64_t>(num_cache_tokens))
+    if (!has_exact_element_count(*query_headers, static_cast<uint64_t>(num_query_tiles)) ||
+        !has_exact_element_count(*cache_headers, static_cast<uint64_t>(num_query_tiles) * static_cast<uint64_t>(num_cache_tokens)) ||
+        !has_exact_element_count(*output, static_cast<uint64_t>(num_cache_tokens)))
     {
         return OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT;
     }
