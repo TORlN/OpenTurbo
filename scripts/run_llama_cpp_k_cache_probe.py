@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import shutil
 import subprocess
 import sys
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 from scaffold_llama_cpp_integration import apply_probe_patch
@@ -20,8 +21,8 @@ from scaffold_llama_cpp_integration import CMAKE_FRAGMENT
 from scaffold_llama_cpp_integration import DEFAULT_LLAMA_CPP_URL
 
 
-MODEL_NAME = "tinyllamas/stories15M-q4_0.gguf"
-MODEL_HASH = "SHA256=66967fbece6dbe97886593fdbb73589584927e29119ec31f08090732d1861739"
+DEFAULT_HF_REPO = "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"
+DEFAULT_HF_FILE = "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
 PROBE_PATTERN = re.compile(r"^\[openturbo\] cpy_k probe .*$", re.MULTILINE)
 
 
@@ -70,6 +71,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--target",
         default="llama-eval-callback",
         help="CMake target to build and run for the probe. Default: llama-eval-callback.",
+    )
+    parser.add_argument(
+        "--model",
+        type=Path,
+        help="Optional local GGUF model path. If omitted, --hf-repo is used.",
+    )
+    parser.add_argument(
+        "--hf-repo",
+        default=DEFAULT_HF_REPO,
+        help="Hugging Face repo used for downloading a GGUF locally before probe execution.",
+    )
+    parser.add_argument(
+        "--hf-file",
+        default=DEFAULT_HF_FILE,
+        help="Optional Hugging Face file override passed with --hf-file.",
+    )
+    parser.add_argument(
+        "--download-dir",
+        type=Path,
+        help="Directory for downloaded GGUF files. Defaults to <build_dir>/models.",
     )
     parser.add_argument(
         "--prompt",
@@ -150,20 +171,18 @@ def build_probe_target(cmake_exe: str, build_dir: Path, config: str, target: str
     run_command([cmake_exe, "--build", str(build_dir), "--config", config, "--target", target])
 
 
-def download_tiny_model(cmake_exe: str, llama_root: Path, build_dir: Path) -> Path:
-    model_dest = build_dir / MODEL_NAME.replace("/", os.sep)
-    download_script = llama_root / "cmake" / "download-models.cmake"
-    run_command(
-        [
-            cmake_exe,
-            f"-DDEST={model_dest.as_posix()}",
-            f"-DNAME={MODEL_NAME}",
-            f"-DHASH={MODEL_HASH}",
-            "-P",
-            str(download_script),
-        ]
-    )
-    return model_dest
+def download_hf_model(hf_repo: str, hf_file: str, destination_dir: Path) -> Path:
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    destination = destination_dir / Path(hf_file).name
+    if destination.exists():
+        return destination
+
+    quoted_file = urllib.parse.quote(hf_file, safe="/")
+    model_url = f"https://huggingface.co/{hf_repo}/resolve/main/{quoted_file}?download=true"
+    print(f"Downloading {hf_repo}/{hf_file} to {destination}", flush=True)
+    with urllib.request.urlopen(model_url) as response, destination.open("wb") as output_file:
+        shutil.copyfileobj(response, output_file, length=1024 * 1024)
+    return destination
 
 
 def resolve_runner(build_dir: Path, config: str, target: str) -> Path:
@@ -172,18 +191,21 @@ def resolve_runner(build_dir: Path, config: str, target: str) -> Path:
 
 
 def run_probe(runner: Path, model_path: Path, prompt: str, seed: str, ngl: str) -> str:
-    completed = subprocess.run(
+    command = [str(runner)]
+    command.extend(["-m", str(model_path)])
+    command.extend(
         [
-            str(runner),
-            "-m",
-            str(model_path),
             "--prompt",
             prompt,
             "--seed",
             seed,
             "-ngl",
             ngl,
-        ],
+        ]
+    )
+
+    completed = subprocess.run(
+        command,
         text=True,
         capture_output=True,
     )
@@ -217,13 +239,21 @@ def main() -> int:
     apply_probe_patch(llama_root, output_root)
     configure_probe_build(cmake_exe, llama_root, build_dir, args.config, openturbo_root)
     build_probe_target(cmake_exe, build_dir, args.config, args.target)
-    model_path = download_tiny_model(cmake_exe, llama_root, build_dir)
     runner = resolve_runner(build_dir, args.config, args.target)
+    if args.model is not None:
+        model_path = args.model.resolve()
+    else:
+        download_dir = (args.download_dir or (build_dir / "models")).resolve()
+        model_path = download_hf_model(args.hf_repo, args.hf_file, download_dir)
+
+    print(f"Running probe with model {model_path}", flush=True)
     probe_line = run_probe(runner, model_path, args.prompt, args.seed, args.ngl)
 
     print(f"llama_root={llama_root}")
     print(f"build_dir={build_dir}")
     print(f"model_path={model_path}")
+    print(f"hf_repo={args.hf_repo}")
+    print(f"hf_file={args.hf_file}")
     print(probe_line)
     return 0
 
