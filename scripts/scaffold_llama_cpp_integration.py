@@ -243,6 +243,7 @@ SHADOW_CALLBACK_CPP = """#include \"openturbo_shadow_eval_callback.hpp\"
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -420,13 +421,16 @@ int openturbo_store_sidecar_rows(openturbo_shadow_layer_sidecar & sidecar,
     return stored_rows;
 }
 
-const ggml_tensor * openturbo_find_named_cache_tensor(const ggml_tensor * tensor, int depth_remaining = 8) {
+const ggml_tensor * openturbo_find_named_tensor_prefix(const ggml_tensor * tensor,
+                                                       const char *        prefix,
+                                                       int                 prefix_len,
+                                                       int                 depth_remaining = 8) {
     if (tensor == nullptr || depth_remaining < 0) {
         return nullptr;
     }
 
     const char * tensor_name = ggml_get_name(tensor);
-    if (tensor_name != nullptr && std::strncmp(tensor_name, "cache_k_l", 8) == 0) {
+    if (tensor_name != nullptr && std::strncmp(tensor_name, prefix, prefix_len) == 0) {
         return tensor;
     }
 
@@ -436,12 +440,136 @@ const ggml_tensor * openturbo_find_named_cache_tensor(const ggml_tensor * tensor
             continue;
         }
 
-        if (const ggml_tensor * found = openturbo_find_named_cache_tensor(source, depth_remaining - 1)) {
+        if (const ggml_tensor * found =
+                openturbo_find_named_tensor_prefix(source, prefix, prefix_len, depth_remaining - 1)) {
             return found;
         }
     }
 
     return nullptr;
+}
+
+const ggml_tensor * openturbo_find_named_cache_tensor(const ggml_tensor * tensor, int depth_remaining = 8) {
+    return openturbo_find_named_tensor_prefix(tensor, "cache_k_l", 8, depth_remaining);
+}
+
+const ggml_tensor * openturbo_find_kq_mask_tensor(const ggml_tensor * tensor, int depth_remaining = 8) {
+    return openturbo_find_named_tensor_prefix(tensor, "attn_inp_kq_mask", 16, depth_remaining);
+}
+
+bool openturbo_copy_mask_values(const ggml_tensor * tensor, std::vector<float> & mask_values) {
+    if (tensor == nullptr) {
+        return false;
+    }
+
+    const int64_t count = ggml_nelements(tensor);
+    if (count <= 0) {
+        mask_values.clear();
+        return true;
+    }
+
+    mask_values.resize(static_cast<size_t>(count));
+    if (tensor->type == GGML_TYPE_F32) {
+        if (tensor->buffer != nullptr && ggml_backend_buffer_is_host(tensor->buffer)) {
+            std::memcpy(mask_values.data(), tensor->data, sizeof(float) * mask_values.size());
+        } else {
+            ggml_backend_tensor_get(tensor, mask_values.data(), 0, sizeof(float) * mask_values.size());
+        }
+        return true;
+    }
+
+    if (tensor->type == GGML_TYPE_F16) {
+        std::vector<ggml_fp16_t> raw(static_cast<size_t>(count));
+        if (tensor->buffer != nullptr && ggml_backend_buffer_is_host(tensor->buffer)) {
+            std::memcpy(raw.data(), tensor->data, sizeof(ggml_fp16_t) * raw.size());
+        } else {
+            ggml_backend_tensor_get(tensor, raw.data(), 0, sizeof(ggml_fp16_t) * raw.size());
+        }
+
+        for (size_t index = 0; index < raw.size(); ++index) {
+            mask_values[index] = ggml_fp16_to_fp32(raw[index]);
+        }
+        return true;
+    }
+
+    return false;
+}
+
+int64_t openturbo_rows_per_stream(const ggml_tensor * tensor) {
+    if (tensor == nullptr || tensor->nb[2] <= 0 || tensor->nb[3] <= 0) {
+        return 0;
+    }
+
+    return tensor->nb[3] / tensor->nb[2];
+}
+
+int64_t openturbo_stream_base_index(const ggml_tensor * tensor) {
+    if (tensor == nullptr || tensor->nb[3] <= 0) {
+        return 0;
+    }
+
+    return static_cast<int64_t>(tensor->view_offs / static_cast<size_t>(tensor->nb[3]));
+}
+
+struct openturbo_shadow_read_coverage {
+    int64_t expected_rows = 0;
+    int present_rows = 0;
+    bool exact = false;
+};
+
+openturbo_shadow_read_coverage openturbo_compute_mask_read_coverage(
+    const ggml_tensor *                    cache_tensor,
+    const ggml_tensor *                    mask_tensor,
+    const openturbo_shadow_layer_sidecar & sidecar) {
+    openturbo_shadow_read_coverage coverage;
+    if (cache_tensor == nullptr || mask_tensor == nullptr || sidecar.row_capacity <= 0) {
+        return coverage;
+    }
+
+    const int64_t n_kv = mask_tensor->ne[0];
+    const int64_t n_tokens_per_stream = std::max<int64_t>(mask_tensor->ne[1], 1);
+    const int64_t n_stream = std::max<int64_t>(mask_tensor->ne[3], 1);
+    const int64_t rows_per_stream = openturbo_rows_per_stream(cache_tensor);
+    const int64_t stream_base_index = openturbo_stream_base_index(cache_tensor);
+    if (n_kv <= 0 || rows_per_stream <= 0 || stream_base_index < 0) {
+        return coverage;
+    }
+
+    std::vector<float> mask_values;
+    if (!openturbo_copy_mask_values(mask_tensor, mask_values)) {
+        return coverage;
+    }
+
+    std::vector<uint8_t> expected_row_flags(static_cast<size_t>(sidecar.row_capacity), 0);
+    for (int64_t stream = 0; stream < n_stream; ++stream) {
+        const int64_t global_stream_base = (stream_base_index + stream) * rows_per_stream;
+        for (int64_t token = 0; token < n_tokens_per_stream; ++token) {
+            const size_t token_offset = static_cast<size_t>((stream * n_tokens_per_stream + token) * n_kv);
+            for (int64_t row = 0; row < n_kv; ++row) {
+                const float mask_value = mask_values[token_offset + static_cast<size_t>(row)];
+                if (!std::isfinite(mask_value)) {
+                    continue;
+                }
+
+                const int64_t global_row = global_stream_base + row;
+                if (global_row < 0 || global_row >= sidecar.row_capacity) {
+                    continue;
+                }
+
+                uint8_t & expected_flag = expected_row_flags[static_cast<size_t>(global_row)];
+                if (expected_flag != 0) {
+                    continue;
+                }
+
+                expected_flag = 1;
+                ++coverage.expected_rows;
+                coverage.present_rows += sidecar.present_rows[static_cast<size_t>(global_row)] != 0 ? 1 : 0;
+            }
+        }
+    }
+
+    coverage.exact = true;
+    return coverage;
 }
 
 bool openturbo_is_read_candidate(const ggml_tensor * tensor) {
@@ -453,28 +581,7 @@ bool openturbo_is_read_candidate(const ggml_tensor * tensor) {
         return false;
     }
 
-    return openturbo_find_named_cache_tensor(tensor) != nullptr;
-}
-
-int64_t openturbo_expected_read_rows(const ggml_tensor * tensor) {
-    if (tensor == nullptr) {
-        return 0;
-    }
-
-    if (tensor->ne[2] > 0) {
-        return tensor->ne[2] * std::max<int64_t>(tensor->ne[3], 1);
-    }
-
-    return std::max<int64_t>(tensor->ne[1], 0);
-}
-
-int openturbo_count_present_prefix_rows(const openturbo_shadow_layer_sidecar & sidecar, int64_t prefix_rows) {
-    const int64_t bounded_rows = std::min<int64_t>(prefix_rows, sidecar.row_capacity);
-    int present_rows = 0;
-    for (int64_t row = 0; row < bounded_rows; ++row) {
-        present_rows += sidecar.present_rows[static_cast<size_t>(row)] != 0 ? 1 : 0;
-    }
-    return present_rows;
+    return openturbo_find_named_cache_tensor(tensor) != nullptr && openturbo_find_kq_mask_tensor(tensor) != nullptr;
 }
 }
 
@@ -493,6 +600,7 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
         }
 
         const ggml_tensor * cache_tensor = openturbo_find_named_cache_tensor(tensor);
+        const ggml_tensor * mask_tensor = openturbo_find_kq_mask_tensor(tensor);
         const int layer_index = openturbo_parse_layer_index(cache_tensor);
         const auto sidecar_it = g_openturbo_shadow_sidecars.find(layer_index);
         if (sidecar_it == g_openturbo_shadow_sidecars.end()) {
@@ -508,17 +616,27 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
         }
 
         const auto & sidecar = sidecar_it->second;
-        const int64_t expected_rows = openturbo_expected_read_rows(cache_tensor);
-        const int64_t bounded_rows = std::min<int64_t>(expected_rows, sidecar.row_capacity);
-        const int present_rows = openturbo_count_present_prefix_rows(sidecar, expected_rows);
+        const auto coverage = openturbo_compute_mask_read_coverage(cache_tensor, mask_tensor, sidecar);
+        if (!coverage.exact) {
+            std::fprintf(stderr,
+                         \"[openturbo] shadow_read layer=%d status=mask_unavailable node=%s mask_type=%d\\n\",
+                         layer_index,
+                         ggml_get_name(tensor),
+                         mask_tensor == nullptr ? -1 : static_cast<int>(mask_tensor->type));
+            if (state != nullptr) {
+                state->logged_read_once = true;
+                state->logged_error = true;
+            }
+            return true;
+        }
 
         std::fprintf(stderr,
                      \"[openturbo] shadow_read layer=%d status=%s node=%s expected_rows=%lld present_rows=%d tiles_per_row=%lld\\n\",
                      layer_index,
-                     present_rows == bounded_rows ? "success" : "partial",
+                     coverage.present_rows == coverage.expected_rows ? "success" : "partial",
                      ggml_get_name(tensor),
-                     static_cast<long long>(expected_rows),
-                     present_rows,
+                     static_cast<long long>(coverage.expected_rows),
+                     coverage.present_rows,
                      static_cast<long long>(sidecar.tiles_per_row));
         if (state != nullptr) {
             state->logged_read_once = true;

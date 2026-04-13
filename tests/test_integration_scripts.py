@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 import importlib.util
 import sys
@@ -102,6 +104,10 @@ def test_generate_scaffold_writes_shadow_and_bridge_files(tmp_path: Path) -> Non
     assert (output_root / "openturbo_llama_cpp_bridge.cpp").exists()
     assert (output_root / "openturbo_shadow_eval_callback.hpp").exists()
     assert (output_root / "openturbo_shadow_eval_callback.cpp").exists()
+
+    shadow_text = (output_root / "openturbo_shadow_eval_callback.cpp").read_text(encoding="utf-8")
+    assert "attn_inp_kq_mask" in shadow_text
+    assert "openturbo_compute_mask_read_coverage" in shadow_text
 
 
 def test_apply_probe_patch_is_idempotent(tmp_path: Path) -> None:
