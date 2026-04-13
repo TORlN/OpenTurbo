@@ -1,3 +1,7 @@
+#ifndef OPENTURBO_CAPI_EXPORTS
+#define OPENTURBO_CAPI_EXPORTS
+#endif
+
 #include "../include/openturbo/c_api.h"
 
 #include "openturbo_cuda_api.cuh"
