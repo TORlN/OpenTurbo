@@ -189,8 +189,20 @@ Known limitations:
 
 If you do not want to wire the downstream bridge by hand, OpenTurbo can generate a drop-in scaffold into an existing llama.cpp checkout or a fresh destination directory:
 
+If you run the script with no arguments, it will create a local `llama` directory in the current working directory and write the scaffold there:
+
+```powershell
+.venv\Scripts\python.exe scripts\scaffold_llama_cpp_integration.py
+```
+
 ```powershell
 .venv\Scripts\python.exe scripts\scaffold_llama_cpp_integration.py C:\path\to\llama.cpp
+```
+
+If you want to choose the checkout path and scaffold output path separately:
+
+```powershell
+.venv\Scripts\python.exe scripts\scaffold_llama_cpp_integration.py --llama-root C:\path\to\llama.cpp --output-dir C:\path\to\generated\openturbo
 ```
 
 To clone llama.cpp and generate the scaffold in one step:

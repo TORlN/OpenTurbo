@@ -6,6 +6,7 @@ from pathlib import Path
 
 
 DEFAULT_LLAMA_CPP_URL = "https://github.com/ggml-org/llama.cpp.git"
+DEFAULT_LLAMA_DIR_NAME = "llama"
 
 
 BRIDGE_HEADER = """#pragma once
@@ -146,25 +147,49 @@ def write_text_file(path: Path, content: str, force: bool) -> None:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate an OpenTurbo integration scaffold inside a llama.cpp checkout.")
-    parser.add_argument("llama_root", type=Path, help="Path to an existing llama.cpp checkout or a destination to clone into.")
+    parser.add_argument("llama_root", nargs="?", type=Path, help="Optional path to an existing llama.cpp checkout or a destination to clone into.")
+    parser.add_argument("--llama-root", dest="llama_root_override", type=Path, help="Explicit llama.cpp checkout path. Overrides the positional llama_root argument when both are provided.")
     parser.add_argument("--clone-if-missing", action="store_true", help="Clone llama.cpp into llama_root if the directory does not exist.")
     parser.add_argument("--clone-url", default=DEFAULT_LLAMA_CPP_URL, help="Repository URL used with --clone-if-missing.")
+    parser.add_argument("--output-dir", type=Path, help="Explicit directory where scaffold files will be written. Overrides --output-subdir when provided.")
     parser.add_argument("--output-subdir", default="examples/openturbo", help="Subdirectory inside llama_root where the scaffold files will be written.")
     parser.add_argument("--force", action="store_true", help="Overwrite existing generated files.")
     return parser
 
 
+def resolve_llama_root(args: argparse.Namespace) -> Path | None:
+    root_arg = args.llama_root_override or args.llama_root
+    if root_arg is None:
+        return (Path.cwd() / DEFAULT_LLAMA_DIR_NAME).resolve()
+    return root_arg.resolve()
+
+
+def ensure_llama_root_exists(llama_root: Path | None, clone_if_missing: bool, clone_url: str) -> None:
+    if llama_root is None or llama_root.exists():
+        return
+
+    if clone_if_missing:
+        run_git_clone(llama_root, clone_url)
+        return
+
+    llama_root.mkdir(parents=True, exist_ok=True)
+
+
+def resolve_output_root(args: argparse.Namespace, llama_root: Path | None) -> Path:
+    if args.output_dir is not None:
+        return args.output_dir.resolve()
+
+    return (llama_root / args.output_subdir).resolve()
+
+
 def main() -> int:
     args = build_arg_parser().parse_args()
-    llama_root: Path = args.llama_root.resolve()
+    llama_root = resolve_llama_root(args)
+    if args.clone_if_missing and llama_root is None:
+        raise ValueError("--clone-if-missing requires a llama_root path or --llama-root.")
 
-    if not llama_root.exists():
-        if args.clone_if_missing:
-            run_git_clone(llama_root, args.clone_url)
-        else:
-            llama_root.mkdir(parents=True, exist_ok=True)
-
-    output_root = llama_root / args.output_subdir
+    ensure_llama_root_exists(llama_root, args.clone_if_missing, args.clone_url)
+    output_root = resolve_output_root(args, llama_root)
     write_text_file(output_root / "openturbo_llama_cpp_bridge.hpp", BRIDGE_HEADER, args.force)
     write_text_file(output_root / "openturbo_llama_cpp_bridge.cpp", BRIDGE_CPP, args.force)
     write_text_file(output_root / "README.md", BRIDGE_README, args.force)
