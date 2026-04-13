@@ -1,90 +1,180 @@
-# OpenTurbo (tq3_0_qjl)
+# OpenTurbo
 
-**A High-Performance CUDA Implementation of TurboQuant (Google, 2026)**
+OpenTurbo is an experimental CUDA prototype for a TurboQuant-style 3-bit KV-cache compression pipeline with a QJL-style residual sign correction path.
 
-`OpenTurbo` provides an open-source, mathematically rigorous implementation of the TurboQuant KV cache compression algorithm, specifically enhanced with **QJL (Quantized Johnson-Lindenstrauss)** error correction.
+The current repository is focused on kernel structure, packing layout, correctness checks, and early integration surfaces. It is not yet a full llama.cpp or ggml integration.
 
-This project targets the **llama.cpp / ggml** ecosystem, enabling localized inference of large language models (like Llama-3 70B) with massive context windows on consumer hardware without the catastrophic perplexity loss seen in radius-only quantization attempts.
+## Current State
 
----
+What exists today:
 
-## The Problem
+* A fused encoder kernel that applies RoPE, runs a 128-wide FWHT, quantizes into a fixed 32-byte tile header, and emits a residual sign word.
+* A scan kernel that estimates query-cache dot products from packed headers, including the residual correction term.
+* CPU reference paths and smoke tests for the encoder and scan logic.
+* A Python extension build path using CMake and scikit-build-core.
+* A versioned native C ABI and an early ggml-style adapter layer intended for future llama.cpp and ggml integration.
 
-Current 3-bit KV cache quantization methods suffer from systematic noise accumulation. In very long contexts, rounding errors develop a bias that shifts the mean of the dot product. This causes the Softmax function to hallucinate importance on irrelevant tokens.
+What does not exist yet:
 
-`OpenTurbo` solves this by treating quantization as a signal processing problem, utilizing an orthogonal rotation to smear outliers and a 1-bit residual correction to preserve the inner-product.
+* A production llama.cpp integration.
+* A direct dependency on ggml headers or runtime types.
+* End-to-end model evaluation, perplexity benchmarking, or full inference wiring.
+* Portable hosted CUDA CI. Real CUDA validation is currently intended for self-hosted Windows runners.
 
----
+## Architecture Snapshot
 
-## Specifications
+The prototype uses a fixed 128-d tile format.
 
-### 1. Random Orthogonal Rotation (FWHT)
-To ensure the 2nd-bit angle quantization is efficient, we must first "smear" the energy of the vector. We implement a **Fast Walsh-Hadamard Transform (FWHT)** using CUDA Warp Shuffles (`__shfl_xor_sync`).
-* **Complexity:** $O(d \log d)$
-* **Hardware:** Zero floating-point multiplications; utilizes addition/subtraction butterflies.
-* **RoPE Interaction:** RoPE is applied before the FWHT to ensure positional geometry is preserved in the transformed space.
+Each packed tile header is 32 bytes:
 
-### 2. 2-bit Polar Quantization
-Once rotated, the vector elements follow a Gaussian distribution. We map pairs of dimensions $(x, y)$ to:
-* **Radius ($R$):** A shared high-precision scale (FP16/E4M3) per block.
-* **Angle ($\theta$):** A 2-bit value representing one of four quadrants ($45^\circ, 135^\circ, 225^\circ, 315^\circ$).
+* `quadrant_word_0` and `quadrant_word_1`: 64 pairs of 2-bit quadrant codes.
+* `qjl_sign_word`: 64 residual sign bits.
+* `block_scale_fp16`: shared block scale.
+* `local_alpha_fp16`: local residual-correction scale.
+* `reserved_u32`: reserved field, currently zero.
 
-### 3. QJL 1-bit Sign Correction
-This is the "1-bit nudge." We calculate the residual error $e = u_{original} - \hat{u}_{quantized}$ and store the sign of the aggregate error.
-* **Correction Formula:** $\langle u, v \rangle \approx \langle \hat{u}, \hat{v} \rangle + \alpha (s_u \cdot s_v)$
-* This ensures that the "direction" of the rounding error is recovered during the attention scan, preventing the Mean Shift.
+The main kernel pipeline is:
 
----
+1. Apply RoPE on input pairs.
+2. Run a 128-point FWHT using warp shuffles.
+3. Quantize each pair into a 2-bit quadrant code.
+4. Compute a shared scale and local alpha term.
+5. Emit one 32-byte packed tile header.
 
-## Project Structure
+The scan path reconstructs approximate pair centers and adds the residual sign-correlation correction:
+
+$$
+\langle q, k \rangle \approx \langle \hat{q}, \hat{k} \rangle + \alpha_k \cdot (s_q \cdot s_k)
+$$
+
+## Repository Layout
 
 ```text
-OPENTURBO/
-├── .github/workflows/   # CI/CD for CUDA/Python builds
-├── src/openturbo/       # Python bindings and CLI
-│   └── *.py             # Model conversion tools
-├── tests/               # Validation vs. FP16 baselines
-├── kernels/             # (TBP) Custom CUDA source (.cu / .cuh)
-├── pyproject.toml       # Build system requirements
-└── README.md            # You are here
+OpenTurbo/
+├── .github/workflows/        # Portable CI and optional self-hosted CUDA CI
+├── .vscode/                  # Build/test tasks for smoke executables
+├── include/openturbo/        # Public native headers
+├── kernels/                  # CUDA kernels, C ABI, adapter layer, smoke tests
+├── scripts/                  # Windows build/install scripts
+├── src/openturbo/            # Python wrapper layers and pybind shim
+├── tests/                    # Python tests, including CUDA smoke coverage
+├── CMakeLists.txt            # Native build graph
+├── pyproject.toml            # Python packaging via scikit-build-core
+└── README.md
 ```
 
-## Building The Python CUDA Extension
+Important files:
 
-The project now includes a native-extension build path for the `_openturbo_cuda`
-module using CMake + scikit-build-core.
+* `kernels/encoder.cu`: fused encoder kernel.
+* `kernels/scan.cu`: packed-header scan kernel.
+* `kernels/openturbo_c_api.cu`: exported C ABI implementation.
+* `kernels/openturbo_ggml_adapter.cpp`: ggml-style tensor adapter layer.
+* `include/openturbo/c_api.h`: versioned public C ABI.
+* `include/openturbo/ggml_adapter.h`: flat tensor adapter contract for future ggml integration.
+* `src/openturbo/cuda_api.py`: raw pointer-based Python wrapper API.
+* `src/openturbo/tensor_api.py`: tensor-like Python wrapper layer.
+
+## Build And Test
+
+### Windows CUDA Build
+
+The Windows CUDA path is the primary native development flow in this repository.
+
+Requirements:
+
+* CUDA Toolkit available locally.
+* Visual Studio 2022 Build Tools with 64-bit C++ tools.
+* A Python environment, typically the local `.venv`.
+
+Install the editable Python package with CUDA bindings:
 
 ```powershell
 scripts\install_cuda_bindings.bat
 ```
 
-On this workspace, the build assumes:
+Useful local smoke-test builds:
 
-* CUDA Toolkit is installed and available at the standard Windows location.
-* Visual Studio 2022 Build Tools are available for 64-bit host builds.
-* The target architecture is RTX 4090 (`sm_89`) unless overridden with `CMAKE_CUDA_ARCHITECTURES`.
+```powershell
+scripts\build_smoke_test.bat
+scripts\build_scan_smoke_test.bat
+scripts\build_c_api_smoke_test.bat
+```
+
+Run the Python tests:
+
+```powershell
+.venv\Scripts\python.exe -m pytest -q
+```
+
+### VS Code Tasks
+
+The workspace includes tasks for:
+
+* `Build CUDA Smoke Test`
+* `Run CUDA Smoke Test`
+* `Build CUDA Scan Smoke Test`
+* `Run CUDA Scan Smoke Test`
+* `Build C API Smoke Test`
+* `Run C API Smoke Test`
+* `Install CUDA Bindings`
+* `Rebuild Bindings And Run Python Tests`
 
 ## Python Integration Layers
 
-The package now exposes three progressively higher-level entry points:
+The Python package exposes three layers of integration:
 
-* Raw launch wrappers in `openturbo.cuda_api` for integer device pointers.
-* Minimal CUDA runtime helpers in `openturbo.cuda_runtime` for Python-side device allocation and copies.
-* Tensor-style bridge helpers in `openturbo.tensor_api` for CUDA tensor-like objects that expose `data_ptr()`.
+* `openturbo.cuda_api`: raw device-pointer launch wrappers.
+* `openturbo.cuda_runtime`: minimal CUDA runtime helpers for Python-side allocation, copies, and synchronization.
+* `openturbo.tensor_api`: tensor-like wrappers for CUDA objects that expose `data_ptr()`.
+
+The Python extension is `_openturbo_cuda`, built through pybind11.
 
 ## Native Integration Layers
 
-The CUDA build now exposes two native integration surfaces above the kernel wrappers:
+The native side currently exposes:
 
-* A shared internal CUDA core used by both the Python extension and the exported C ABI.
-* An exported C header at `include/openturbo/c_api.h` for future ggml / llama.cpp integration without pybind11.
+* `openturbo_cuda_core`: shared kernel implementation target used by both native surfaces.
+* `openturbo_c_api`: shared library exposing a stable C ABI.
+* `include/openturbo/c_api.h`: public ABI with explicit version and status codes.
+* `include/openturbo/ggml_adapter.h`: early ggml-style adapter API over flat tensor metadata.
 
-The native ABI now has an explicit version and status contract:
+The C ABI intentionally separates OpenTurbo status from raw CUDA status:
 
-* `openturbo_get_c_api_version()` returns the packed ABI version declared in `include/openturbo/c_api.h`.
-* Public entry points return `openturbo_status_t`, while raw CUDA launch status is reported separately via `cuda_status_out`.
-* `openturbo_status_string()` and `openturbo_cuda_error_string()` provide stable text for logging and downstream error handling.
+* Public functions return `openturbo_status_t`.
+* `cuda_status_out` exposes the underlying CUDA error code when applicable.
+* `openturbo_status_string()` and `openturbo_cuda_error_string()` provide logging-friendly text.
 
-The first ggml-facing adapter lives in `include/openturbo/ggml_adapter.h`. It accepts flat ggml-style tensor metadata (`data`, `ne`, `nb`, element type, and stream context) and maps validated contiguous buffers onto the C ABI.
+## Testing And CI
 
-A direct native smoke path is available in VS Code via the `Build C API Smoke Test` and `Run C API Smoke Test` tasks.
+Local validation currently includes:
+
+* Encoder smoke test executable.
+* Scan smoke test executable.
+* Native C ABI smoke test executable.
+* Python unit and smoke tests.
+
+GitHub Actions currently does the following:
+
+* Ubuntu and hosted Windows jobs run Python/package validation with `OPENTURBO_BUILD_CUDA=OFF`.
+* The real Windows CUDA build is available only through manual `workflow_dispatch` on a self-hosted runner labeled `self-hosted`, `windows`, `x64`, and `cuda`.
+
+That split is intentional: hosted runners are used for portable package validation, while actual CUDA builds are reserved for environments that already have a working CUDA toolchain and GPU path.
+
+## Limitations
+
+This repo should currently be treated as a kernel and integration prototype.
+
+Known limitations:
+
+* The ggml-facing adapter is a compatibility layer, not a full ggml integration.
+* The project is currently Windows-first for CUDA development.
+* The Python tensor layer uses duck typing and does not enforce a specific framework.
+* The packed-header format and ABI are still young enough that downstream integrations should treat them as evolving.
+
+## Next Work
+
+Likely next engineering steps are:
+
+1. Expand native smoke coverage to the scan-side C ABI entry points.
+2. Tighten the ggml adapter around exact KV-cache shape and stride contracts.
+3. Add a real llama.cpp-side bridge layer once the adapter contract stabilizes.

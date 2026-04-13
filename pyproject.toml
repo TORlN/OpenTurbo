@@ -5,18 +5,36 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "openturbo"
 version = "0.0.1"
-description = "A Python package"
+description = "Experimental CUDA prototype for TurboQuant-style 3-bit KV-cache compression"
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
-authors = [ { name = "Your Name", email = "you@example.com" } ]
+authors = [{ name = "TORlN" }]
 dependencies = []
+keywords = ["cuda", "kv-cache", "quantization", "llm", "ggml", "llama.cpp"]
+classifiers = [
+	"Development Status :: 3 - Alpha",
+	"Intended Audience :: Developers",
+	"License :: OSI Approved :: MIT License",
+	"Operating System :: Microsoft :: Windows",
+	"Programming Language :: Python :: 3",
+	"Programming Language :: Python :: 3.8",
+	"Programming Language :: Python :: 3.9",
+	"Programming Language :: Python :: 3.10",
+	"Programming Language :: Python :: 3.11",
+	"Programming Language :: Python :: 3.12",
+	"Programming Language :: C++",
+	"Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 
 [project.urls]
-Homepage = "https://example.com"
+Homepage = "https://github.com/TORlN/OpenTurbo"
+Repository = "https://github.com/TORlN/OpenTurbo"
+Issues = "https://github.com/TORlN/OpenTurbo/issues"
 
 [project.optional-dependencies]
 bindings = ["pybind11>=2.12"]
+test = ["pytest>=8"]
 
 [tool.scikit-build]
 wheel.packages = ["src/openturbo"]
