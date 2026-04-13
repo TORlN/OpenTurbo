@@ -110,6 +110,7 @@ def test_generate_scaffold_writes_shadow_and_bridge_files(tmp_path: Path) -> Non
     assert "openturbo_compute_mask_read_coverage" in shadow_text
     assert "shadow_score" in shadow_text
     assert "shadow_compare" in shadow_text
+    assert "shadow_snr" in shadow_text
     assert "shadow_components" in shadow_text
     assert "shadow_legacy" in shadow_text
     assert "corner_max_abs_error=%.6f\\n" in shadow_text
@@ -160,18 +161,20 @@ def test_parse_probe_output_requires_both_lines() -> None:
             "[openturbo] shadow_read layer=0 status=success node=kq-0 expected_rows=1 present_rows=1 tiles_per_row=8",
             "[openturbo] shadow_score layer=0 status=success node=kq-0 active_rows=1 num_heads=8 num_query_tiles=1 first_row=0 first_score=1.0 top_row=0 top_score=1.0",
             "[openturbo] shadow_compare layer=0 status=success node=kq-0 active_rows=1 top_match=1 first_row=0 shadow_first=1.0 dense_first=1.1 shadow_top_row=0 shadow_top=1.0 dense_top_row=0 dense_top=1.1 mae=0.1 max_abs_error=0.1",
+            "[openturbo] shadow_snr layer=0 status=success node=kq-0 fwht_signal_power=4.0 fwht_noise_power=0.04 fwht_snr_db=20.0 signal_retention=99.009903 legacy_noise_power=0.16 legacy_snr_db=13.979400 legacy_signal_retention=96.153847",
             "[openturbo] shadow_components layer=0 status=success node=kq-0 first_main=0.8 first_residual=0.2 mean_main=0.8 mean_residual=0.2",
             "[openturbo] shadow_legacy layer=0 status=success node=kq-0 corner_top_match=1 corner_first=0.6 corner_top_row=0 corner_top=0.6 corner_mae=0.2 corner_max_abs_error=0.2",
         ]
     )
 
-    probe_line, shadow_line, shadow_read_line, shadow_score_line, shadow_compare_line, shadow_components_line, shadow_legacy_line = probe_runner.parse_probe_output(output, 0)
+    probe_line, shadow_line, shadow_read_line, shadow_score_line, shadow_compare_line, shadow_snr_line, shadow_components_line, shadow_legacy_line = probe_runner.parse_probe_output(output, 0)
 
     assert probe_line.startswith("[openturbo] cpy_k probe")
     assert shadow_line.startswith("[openturbo] shadow_encode")
     assert shadow_read_line.startswith("[openturbo] shadow_read")
     assert shadow_score_line.startswith("[openturbo] shadow_score")
     assert shadow_compare_line.startswith("[openturbo] shadow_compare")
+    assert shadow_snr_line.startswith("[openturbo] shadow_snr")
     assert shadow_components_line.startswith("[openturbo] shadow_components")
     assert shadow_legacy_line.startswith("[openturbo] shadow_legacy")
 
@@ -228,10 +231,28 @@ def test_parse_probe_output_rejects_missing_shadow_components_line() -> None:
             "[openturbo] shadow_read layer=0 status=success node=kq-0 expected_rows=1 present_rows=1 tiles_per_row=8",
             "[openturbo] shadow_score layer=0 status=success node=kq-0 active_rows=1 num_heads=8 num_query_tiles=1 first_row=0 first_score=1.0 top_row=0 top_score=1.0",
             "[openturbo] shadow_compare layer=0 status=success node=kq-0 active_rows=1 top_match=1 first_row=0 shadow_first=1.0 dense_first=1.1 shadow_top_row=0 shadow_top=1.0 dense_top_row=0 dense_top=1.1 mae=0.1 max_abs_error=0.1",
+            "[openturbo] shadow_snr layer=0 status=success node=kq-0 fwht_signal_power=4.0 fwht_noise_power=0.04 fwht_snr_db=20.0 signal_retention=99.009903 legacy_noise_power=0.16 legacy_snr_db=13.979400 legacy_signal_retention=96.153847",
         ]
     )
 
     with pytest.raises(RuntimeError, match="shadow_components"):
+        probe_runner.parse_probe_output(output, 0)
+
+
+def test_parse_probe_output_rejects_missing_shadow_snr_line() -> None:
+    output = "\n".join(
+        [
+            "[openturbo] cpy_k probe layer=0 compatible=1 head_dim=128",
+            "[openturbo] shadow_encode layer=0 status=success num_tiles=16",
+            "[openturbo] shadow_read layer=0 status=success node=kq-0 expected_rows=1 present_rows=1 tiles_per_row=8",
+            "[openturbo] shadow_score layer=0 status=success node=kq-0 active_rows=1 num_heads=8 num_query_tiles=1 first_row=0 first_score=1.0 top_row=0 top_score=1.0",
+            "[openturbo] shadow_compare layer=0 status=success node=kq-0 active_rows=1 top_match=1 first_row=0 shadow_first=1.0 dense_first=1.1 shadow_top_row=0 shadow_top=1.0 dense_top_row=0 dense_top=1.1 mae=0.1 max_abs_error=0.1",
+            "[openturbo] shadow_components layer=0 status=success node=kq-0 first_main=0.8 first_residual=0.2 mean_main=0.8 mean_residual=0.2",
+            "[openturbo] shadow_legacy layer=0 status=success node=kq-0 corner_top_match=1 corner_first=0.6 corner_top_row=0 corner_top=0.6 corner_mae=0.2 corner_max_abs_error=0.2",
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="shadow_snr"):
         probe_runner.parse_probe_output(output, 0)
 
 
@@ -243,6 +264,7 @@ def test_parse_probe_output_rejects_missing_shadow_legacy_line() -> None:
             "[openturbo] shadow_read layer=0 status=success node=kq-0 expected_rows=1 present_rows=1 tiles_per_row=8",
             "[openturbo] shadow_score layer=0 status=success node=kq-0 active_rows=1 num_heads=8 num_query_tiles=1 first_row=0 first_score=1.0 top_row=0 top_score=1.0",
             "[openturbo] shadow_compare layer=0 status=success node=kq-0 active_rows=1 top_match=1 first_row=0 shadow_first=1.0 dense_first=1.1 shadow_top_row=0 shadow_top=1.0 dense_top_row=0 dense_top=1.1 mae=0.1 max_abs_error=0.1",
+            "[openturbo] shadow_snr layer=0 status=success node=kq-0 fwht_signal_power=4.0 fwht_noise_power=0.04 fwht_snr_db=20.0 signal_retention=99.009903 legacy_noise_power=0.16 legacy_snr_db=13.979400 legacy_signal_retention=96.153847",
             "[openturbo] shadow_components layer=0 status=success node=kq-0 first_main=0.8 first_residual=0.2 mean_main=0.8 mean_residual=0.2",
         ]
     )

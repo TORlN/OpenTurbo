@@ -102,15 +102,8 @@ namespace openturbo
         const uint32_t q0 = encode_quadrant_code(values.r0, values.r1);
         const uint32_t q1 = encode_quadrant_code(values.r2, values.r3);
 
-        float x0_hat;
-        float y0_hat;
-        float x1_hat;
-        float y1_hat;
-        reconstruct_pair_from_code(q0, block_scale, x0_hat, y0_hat);
-        reconstruct_pair_from_code(q1, block_scale, x1_hat, y1_hat);
-
-        const float rho0 = residual_statistic_from_code(values.r0, values.r1, block_scale, q0);
-        const float rho1 = residual_statistic_from_code(values.r2, values.r3, block_scale, q1);
+        const float rho0 = residual_statistic_from_code_box_center(values.r0, values.r1, block_scale, q0);
+        const float rho1 = residual_statistic_from_code_box_center(values.r2, values.r3, block_scale, q1);
 
         LaneQuantization result{};
         result.quadrant_fragment = q0 | (q1 << 2);
@@ -195,7 +188,7 @@ namespace openturbo
         float tile_abs_max = warp_reduce_max(local_abs_max);
         tile_abs_max = __shfl_sync(kWarpMask, tile_abs_max, 0);
 
-        const float block_scale = tile_abs_max;
+        const float block_scale = tile_abs_max * kBlockScaleCalibration;
 
         const LaneQuantization quantized = quantize_lane_pairs(values, block_scale);
 

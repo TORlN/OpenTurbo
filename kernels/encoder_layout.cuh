@@ -12,6 +12,7 @@ namespace openturbo
     constexpr int kPairsPerTile = 64;
     constexpr float kInvSqrt2 = 0.7071067811865475f;
     constexpr float kBoxCenterCoord = 0.5f;
+    constexpr float kBlockScaleCalibration = 0.875f;
 
     struct alignas(32) PackedTileHeader
     {
@@ -85,6 +86,24 @@ namespace openturbo
         const float sx = sign_from_bit(x_bit);
         const float sy = sign_from_bit(y_bit);
         const float center = scale * kInvSqrt2;
+        const float x_hat = center * sx;
+        const float y_hat = center * sy;
+        const float ex = x - x_hat;
+        const float ey = y - y_hat;
+        return ex * sx + ey * sy;
+    }
+
+    __host__ __device__ __forceinline__ float residual_statistic_from_code_box_center(
+        float x,
+        float y,
+        float scale,
+        uint32_t code)
+    {
+        const uint32_t y_bit = code & 0x1u;
+        const uint32_t x_bit = (code >> 1) & 0x1u;
+        const float sx = sign_from_bit(x_bit);
+        const float sy = sign_from_bit(y_bit);
+        const float center = scale * kBoxCenterCoord;
         const float x_hat = center * sx;
         const float y_hat = center * sy;
         const float ex = x - x_hat;

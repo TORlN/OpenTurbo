@@ -11,6 +11,7 @@ What exists today:
 * A fused encoder kernel that applies RoPE, runs a 128-wide FWHT, quantizes into a fixed 32-byte tile header, and emits a residual sign word.
 * A scan kernel that estimates query-cache dot products from packed headers, including the residual correction term.
 * CPU reference paths and smoke tests for the encoder and scan logic, with the box-center scan geometry now promoted into the default estimator and the legacy corner geometry retained as an explicit comparison path.
+* A GQA-aware downstream probe path that matches Llama-3 style grouped-query attention and memory layout instead of sampling a single representative head.
 * A Python extension build path using CMake and scikit-build-core.
 * A versioned native C ABI, a concrete head-local ggml-style adapter contract, a llama-facing request bridge, and a KV slicing shim for dense multi-head storage.
 
@@ -22,6 +23,12 @@ What does not exist yet:
 * Portable hosted CUDA CI. Real CUDA validation is currently intended for self-hosted Windows runners.
 
 ## Architecture Snapshot
+
+OpenTurbo is now GQA-aware for downstream probing and is shaped around Llama-3 style KV memory layouts.
+
+* GQA-aware score aggregation maps each query head back onto its KV head before averaging diagnostics, which matches Llama-3 style `32q : 8kv` grouping.
+* Llama-3 friendly cache packing keeps tiles contiguous within each token, which aligns with how downstream llama.cpp cache views are sliced.
+* Calibrated box-center quantization keeps the encoder and scan path on the same reconstruction geometry, while the legacy corner estimator remains available for side-by-side comparison.
 
 The prototype uses a fixed 128-d tile format.
 
@@ -261,10 +268,11 @@ That patch set does two additional things during downstream execution:
 2. `shadow_read`: observes the first executed attention node whose source chain reaches both `cache_k_l*` and `attn_inp_kq_mask`, then reports exact active-row coverage derived from the downstream mask rather than the padded K-cache view extent.
 3. `shadow_score`: encodes the executed query heads in pre-rotated form, gathers the exact active sidecar rows, and runs an OpenTurbo scan estimate over those rows. On grouped-query-attention models, it now scores all query heads and maps each one onto its KV group before averaging the comparison metrics.
 4. `shadow_compare`: computes a dense reference score from the executed flash-attention `q` and `k` tensors for the same exact active rows, then reports rank agreement and error metrics against `shadow_score`.
-5. `shadow_components`: splits the current packed estimator into its quadrant main term and residual-correction term so remaining calibration failures can be attributed to the right part of the approximation.
-6. `shadow_legacy`: logs the previous corner-based estimator as a comparison line after the box-center geometry becomes the real scan path.
+5. `shadow_snr`: computes FWHT-domain signal power, noise power, SNR, and a bounded signal-retention percentage so the probe produces a single benchmark-friendly quality number.
+6. `shadow_components`: splits the current packed estimator into its quadrant main term and residual-correction term so remaining calibration failures can be attributed to the right part of the approximation.
+7. `shadow_legacy`: logs the previous corner-based estimator as a comparison line after the box-center geometry becomes the real scan path.
 
-At the current stage this remains a probe path, not a full attention replacement. The read-side path now uses exact mask-derived rows, and the score path is still experimental logging rather than a substitution for llama.cpp attention. The default estimator now uses the box-center geometry that previously only existed as a probe hypothesis, while `shadow_legacy` preserves the older corner reconstruction as a side-by-side diagnostic. On the current Llama-3.1-8B downstream probe, promoting box-center plus scoring all query heads in each GQA group improved the FWHT-domain mean absolute error from roughly `1.42e4` in the original corner path to about `4.21e3`, with mean scale ratio improving from about `3.33` to about `1.68`.
+At the current stage this remains a probe path, not a full attention replacement. The read-side path now uses exact mask-derived rows, and the score path is still experimental logging rather than a substitution for llama.cpp attention. The default estimator now uses box-center geometry, encoder-side block-scale calibration, and box-center residual statistics, while `shadow_legacy` preserves the older corner reconstruction as a side-by-side diagnostic. The probe also emits `shadow_snr`, which turns the FWHT-domain comparison into a single retention-style metric suitable for README benchmarking. On the current Llama-3.1-8B downstream probe, the calibrated path reports `fwht_mae ~= 396`, `fwht_mean_scale_ratio ~= 1.083`, `fwht_snr_db ~= 24.53`, and `signal_retention ~= 99.65%`.
 
 ## Current Validation
 
@@ -272,12 +280,13 @@ The repo is currently validated at three levels:
 
 * Python tests via `pytest`, including scaffold generation, downstream patch idempotency, and probe-output parsing.
 * Native CUDA smoke coverage via `build\c_api_smoke_test.exe`.
-* Downstream llama.cpp execution via `scripts\run_llama_cpp_k_cache_probe.py`, which now requires all seven runtime lines:
+* Downstream llama.cpp execution via `scripts\run_llama_cpp_k_cache_probe.py`, which now requires all eight runtime lines:
 	* `cpy_k probe`
 	* `shadow_encode`
 	* `shadow_read`
 	* `shadow_score`
 	* `shadow_compare`
+	* `shadow_snr`
 	* `shadow_components`
 	* `shadow_legacy`
 

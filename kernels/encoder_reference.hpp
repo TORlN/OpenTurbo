@@ -61,6 +61,7 @@ namespace openturbo
         {
             fields.block_scale = std::fmax(fields.block_scale, std::fabs(transformed[i]));
         }
+        fields.block_scale *= kBlockScaleCalibration;
 
         float alpha_sum = 0.0f;
         for (int pair_index = 0; pair_index < kPairsPerTile; ++pair_index)
@@ -68,7 +69,7 @@ namespace openturbo
             const float x = transformed[2 * pair_index];
             const float y = transformed[2 * pair_index + 1];
             const uint32_t code = encode_quadrant_code(x, y);
-            const float rho = residual_statistic_from_code(x, y, fields.block_scale, code);
+            const float rho = residual_statistic_from_code_box_center(x, y, fields.block_scale, code);
             const uint32_t qjl_bit = sign_bit_from_value(rho);
 
             if (pair_index < 32)

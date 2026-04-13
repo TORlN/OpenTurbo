@@ -541,6 +541,10 @@ struct openturbo_shadow_score_summary {
     float fwht_mean_abs_error = 0.0f;
     float fwht_max_abs_error = 0.0f;
     float fwht_mean_scale_ratio = 0.0f;
+    float fwht_signal_power = 0.0f;
+    float fwht_noise_power = 0.0f;
+    float fwht_snr_db = 0.0f;
+    float fwht_signal_retention = 0.0f;
     int fwht_top_match = 0;
     float component_first_main = 0.0f;
     float component_first_residual = 0.0f;
@@ -549,6 +553,9 @@ struct openturbo_shadow_score_summary {
     float legacy_first_score = 0.0f;
     float legacy_mean_abs_error = 0.0f;
     float legacy_max_abs_error = 0.0f;
+    float legacy_noise_power = 0.0f;
+    float legacy_snr_db = 0.0f;
+    float legacy_signal_retention = 0.0f;
     int64_t legacy_top_row = -1;
     float legacy_top_score = 0.0f;
     int legacy_top_match = 0;
@@ -561,6 +568,27 @@ struct openturbo_scan_component_breakdown {
 
 float openturbo_sign_from_bit(uint32_t bit) {
     return bit != 0 ? 1.0f : -1.0f;
+}
+
+float openturbo_compute_snr_db(float signal_power, float noise_power) {
+    if (!(signal_power > 0.0f)) {
+        return 0.0f;
+    }
+
+    if (!(noise_power > 0.0f)) {
+        return INFINITY;
+    }
+
+    return 10.0f * std::log10(signal_power / noise_power);
+}
+
+float openturbo_compute_signal_retention(float signal_power, float noise_power) {
+    const float total_power = signal_power + noise_power;
+    if (!(total_power > 0.0f)) {
+        return 0.0f;
+    }
+
+    return 100.0f * (signal_power / total_power);
 }
 
 void openturbo_reconstruct_pair_from_code(uint32_t code, float scale, float & x_hat, float & y_hat) {
@@ -1025,7 +1053,10 @@ openturbo_shadow_score_summary openturbo_run_shadow_score(const ggml_tensor *   
         float total_abs_error = 0.0f;
         float total_fwht_abs_error = 0.0f;
         float total_fwht_scale_ratio = 0.0f;
+        float total_fwht_signal_sq = 0.0f;
+        float total_fwht_noise_sq = 0.0f;
         float total_legacy_abs_error = 0.0f;
+        float total_legacy_noise_sq = 0.0f;
         float total_component_main = 0.0f;
         float total_component_residual = 0.0f;
         int fwht_scale_ratio_count = 0;
@@ -1086,9 +1117,14 @@ openturbo_shadow_score_summary openturbo_run_shadow_score(const ggml_tensor *   
             const float abs_error = std::fabs(mean_score - mean_dense_score);
             const float fwht_abs_error = std::fabs(mean_score - mean_fwht_score);
             const float legacy_abs_error = std::fabs(mean_legacy_score - mean_fwht_score);
+            const float fwht_noise = mean_score - mean_fwht_score;
+            const float legacy_noise = mean_legacy_score - mean_fwht_score;
             total_abs_error += abs_error;
             total_fwht_abs_error += fwht_abs_error;
             total_legacy_abs_error += legacy_abs_error;
+            total_fwht_signal_sq += mean_fwht_score * mean_fwht_score;
+            total_fwht_noise_sq += fwht_noise * fwht_noise;
+            total_legacy_noise_sq += legacy_noise * legacy_noise;
             summary.max_abs_error = std::max(summary.max_abs_error, abs_error);
             summary.fwht_max_abs_error = std::max(summary.fwht_max_abs_error, fwht_abs_error);
             summary.legacy_max_abs_error = std::max(summary.legacy_max_abs_error, legacy_abs_error);
@@ -1132,9 +1168,16 @@ openturbo_shadow_score_summary openturbo_run_shadow_score(const ggml_tensor *   
         summary.fwht_mean_abs_error = total_fwht_abs_error / static_cast<float>(active_rows.size());
         summary.fwht_top_match = summary.top_row == summary.fwht_top_row ? 1 : 0;
         summary.fwht_mean_scale_ratio = fwht_scale_ratio_count > 0 ? total_fwht_scale_ratio / static_cast<float>(fwht_scale_ratio_count) : 0.0f;
+        summary.fwht_signal_power = total_fwht_signal_sq / static_cast<float>(active_rows.size());
+        summary.fwht_noise_power = total_fwht_noise_sq / static_cast<float>(active_rows.size());
+        summary.fwht_snr_db = openturbo_compute_snr_db(summary.fwht_signal_power, summary.fwht_noise_power);
+        summary.fwht_signal_retention = openturbo_compute_signal_retention(summary.fwht_signal_power, summary.fwht_noise_power);
         summary.component_mean_main = total_component_main / static_cast<float>(active_rows.size() * num_query_heads);
         summary.component_mean_residual = total_component_residual / static_cast<float>(active_rows.size() * num_query_heads);
         summary.legacy_mean_abs_error = total_legacy_abs_error / static_cast<float>(active_rows.size());
+        summary.legacy_noise_power = total_legacy_noise_sq / static_cast<float>(active_rows.size());
+        summary.legacy_snr_db = openturbo_compute_snr_db(summary.fwht_signal_power, summary.legacy_noise_power);
+        summary.legacy_signal_retention = openturbo_compute_signal_retention(summary.fwht_signal_power, summary.legacy_noise_power);
         summary.legacy_top_match = summary.legacy_top_row == summary.fwht_top_row ? 1 : 0;
     }
 
@@ -1260,6 +1303,17 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
                              score_summary.fwht_max_abs_error,
                              score_summary.fwht_mean_scale_ratio);
                 std::fprintf(stderr,
+                             "[openturbo] shadow_snr layer=%d status=success node=%s fwht_signal_power=%.6f fwht_noise_power=%.6f fwht_snr_db=%.6f signal_retention=%.6f legacy_noise_power=%.6f legacy_snr_db=%.6f legacy_signal_retention=%.6f\\n",
+                             layer_index,
+                             ggml_get_name(tensor),
+                             score_summary.fwht_signal_power,
+                             score_summary.fwht_noise_power,
+                             score_summary.fwht_snr_db,
+                             score_summary.fwht_signal_retention,
+                             score_summary.legacy_noise_power,
+                             score_summary.legacy_snr_db,
+                             score_summary.legacy_signal_retention);
+                std::fprintf(stderr,
                              "[openturbo] shadow_components layer=%d status=success node=%s first_main=%.6f first_residual=%.6f mean_main=%.6f mean_residual=%.6f\\n",
                              layer_index,
                              ggml_get_name(tensor),
@@ -1285,6 +1339,11 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
                              ggml_get_name(tensor));
                 std::fprintf(stderr,
                              "[openturbo] shadow_compare layer=%d status=%s node=%s\\n",
+                             layer_index,
+                             score_summary.reason,
+                             ggml_get_name(tensor));
+                std::fprintf(stderr,
+                             "[openturbo] shadow_snr layer=%d status=%s node=%s\\n",
                              layer_index,
                              score_summary.reason,
                              ggml_get_name(tensor));
