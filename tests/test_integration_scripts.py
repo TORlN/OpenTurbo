@@ -111,7 +111,10 @@ def test_generate_scaffold_writes_shadow_and_bridge_files(tmp_path: Path) -> Non
     assert "shadow_score" in shadow_text
     assert "shadow_compare" in shadow_text
     assert "shadow_components" in shadow_text
-    assert "shadow_hypothesis" in shadow_text
+    assert "shadow_legacy" in shadow_text
+    assert "corner_max_abs_error=%.6f\\n" in shadow_text
+    assert "shadow_legacy layer=%d status=%s node=%s\\n" in shadow_text
+    assert "query_head_index / query_head_group" in shadow_text
 
 
 def test_apply_probe_patch_is_idempotent(tmp_path: Path) -> None:
@@ -158,11 +161,11 @@ def test_parse_probe_output_requires_both_lines() -> None:
             "[openturbo] shadow_score layer=0 status=success node=kq-0 active_rows=1 num_heads=8 num_query_tiles=1 first_row=0 first_score=1.0 top_row=0 top_score=1.0",
             "[openturbo] shadow_compare layer=0 status=success node=kq-0 active_rows=1 top_match=1 first_row=0 shadow_first=1.0 dense_first=1.1 shadow_top_row=0 shadow_top=1.0 dense_top_row=0 dense_top=1.1 mae=0.1 max_abs_error=0.1",
             "[openturbo] shadow_components layer=0 status=success node=kq-0 first_main=0.8 first_residual=0.2 mean_main=0.8 mean_residual=0.2",
-            "[openturbo] shadow_hypothesis layer=0 status=success node=kq-0 box_top_match=1 box_first=0.6 box_top_row=0 box_top=0.6 box_mae=0.2 box_max_abs_error=0.2",
+            "[openturbo] shadow_legacy layer=0 status=success node=kq-0 corner_top_match=1 corner_first=0.6 corner_top_row=0 corner_top=0.6 corner_mae=0.2 corner_max_abs_error=0.2",
         ]
     )
 
-    probe_line, shadow_line, shadow_read_line, shadow_score_line, shadow_compare_line, shadow_components_line, shadow_hypothesis_line = probe_runner.parse_probe_output(output, 0)
+    probe_line, shadow_line, shadow_read_line, shadow_score_line, shadow_compare_line, shadow_components_line, shadow_legacy_line = probe_runner.parse_probe_output(output, 0)
 
     assert probe_line.startswith("[openturbo] cpy_k probe")
     assert shadow_line.startswith("[openturbo] shadow_encode")
@@ -170,7 +173,7 @@ def test_parse_probe_output_requires_both_lines() -> None:
     assert shadow_score_line.startswith("[openturbo] shadow_score")
     assert shadow_compare_line.startswith("[openturbo] shadow_compare")
     assert shadow_components_line.startswith("[openturbo] shadow_components")
-    assert shadow_hypothesis_line.startswith("[openturbo] shadow_hypothesis")
+    assert shadow_legacy_line.startswith("[openturbo] shadow_legacy")
 
 
 def test_parse_probe_output_rejects_missing_shadow_line() -> None:
@@ -232,7 +235,7 @@ def test_parse_probe_output_rejects_missing_shadow_components_line() -> None:
         probe_runner.parse_probe_output(output, 0)
 
 
-def test_parse_probe_output_rejects_missing_shadow_hypothesis_line() -> None:
+def test_parse_probe_output_rejects_missing_shadow_legacy_line() -> None:
     output = "\n".join(
         [
             "[openturbo] cpy_k probe layer=0 compatible=1 head_dim=128",
@@ -244,7 +247,7 @@ def test_parse_probe_output_rejects_missing_shadow_hypothesis_line() -> None:
         ]
     )
 
-    with pytest.raises(RuntimeError, match="shadow_hypothesis"):
+    with pytest.raises(RuntimeError, match="shadow_legacy"):
         probe_runner.parse_probe_output(output, 0)
 
 

@@ -10,7 +10,7 @@ What exists today:
 
 * A fused encoder kernel that applies RoPE, runs a 128-wide FWHT, quantizes into a fixed 32-byte tile header, and emits a residual sign word.
 * A scan kernel that estimates query-cache dot products from packed headers, including the residual correction term.
-* CPU reference paths and smoke tests for the encoder and scan logic, plus a reference-only box-center scan variant for calibration experiments before changing the CUDA kernel.
+* CPU reference paths and smoke tests for the encoder and scan logic, with the box-center scan geometry now promoted into the default estimator and the legacy corner geometry retained as an explicit comparison path.
 * A Python extension build path using CMake and scikit-build-core.
 * A versioned native C ABI, a concrete head-local ggml-style adapter contract, a llama-facing request bridge, and a KV slicing shim for dense multi-head storage.
 
@@ -259,12 +259,12 @@ That patch set does two additional things during downstream execution:
 
 1. `shadow_encode`: runs the pre-rotated OpenTurbo encoder on executed `GGML_OP_SET_ROWS` K-cache writes and stores the packed headers in a per-layer sidecar keyed by cache row index.
 2. `shadow_read`: observes the first executed attention node whose source chain reaches both `cache_k_l*` and `attn_inp_kq_mask`, then reports exact active-row coverage derived from the downstream mask rather than the padded K-cache view extent.
-3. `shadow_score`: encodes the executed query heads in pre-rotated form, gathers the exact active sidecar rows, and runs a first OpenTurbo scan estimate over those rows. On grouped-query-attention models, it currently uses one representative query head per KV group.
+3. `shadow_score`: encodes the executed query heads in pre-rotated form, gathers the exact active sidecar rows, and runs an OpenTurbo scan estimate over those rows. On grouped-query-attention models, it now scores all query heads and maps each one onto its KV group before averaging the comparison metrics.
 4. `shadow_compare`: computes a dense reference score from the executed flash-attention `q` and `k` tensors for the same exact active rows, then reports rank agreement and error metrics against `shadow_score`.
-5. `shadow_components`: splits the packed estimator into its quadrant main term and residual-correction term so calibration failures can be attributed to the right part of the approximation.
-6. `shadow_hypothesis`: logs a probe-only “box-center” variant that halves the main quadrant term, used to test whether the current pair reconstruction geometry is the dominant source of over-scale.
+5. `shadow_components`: splits the current packed estimator into its quadrant main term and residual-correction term so remaining calibration failures can be attributed to the right part of the approximation.
+6. `shadow_legacy`: logs the previous corner-based estimator as a comparison line after the box-center geometry becomes the real scan path.
 
-At the current stage this remains a probe path, not a full attention replacement. The read-side path now uses exact mask-derived rows, and the score path is still experimental logging rather than a substitution for llama.cpp attention. On the current Llama-3.1-8B probe, `shadow_compare` reports a matching top row on the tiny active set but a large absolute score gap. The new diagnostics show that the remaining over-scale is dominated by the quadrant main term rather than the residual correction term, and that a probe-only box-center variant materially reduces the FWHT-domain error while preserving the top-row match.
+At the current stage this remains a probe path, not a full attention replacement. The read-side path now uses exact mask-derived rows, and the score path is still experimental logging rather than a substitution for llama.cpp attention. The default estimator now uses the box-center geometry that previously only existed as a probe hypothesis, while `shadow_legacy` preserves the older corner reconstruction as a side-by-side diagnostic. On the current Llama-3.1-8B downstream probe, promoting box-center plus scoring all query heads in each GQA group improved the FWHT-domain mean absolute error from roughly `1.42e4` in the original corner path to about `4.21e3`, with mean scale ratio improving from about `3.33` to about `1.68`.
 
 ## Current Validation
 
@@ -279,7 +279,7 @@ The repo is currently validated at three levels:
 	* `shadow_score`
 	* `shadow_compare`
 	* `shadow_components`
-	* `shadow_hypothesis`
+	* `shadow_legacy`
 
 The generated files are intentionally small and explicit. They wrap real `ggml_tensor` objects through `include/openturbo/ggml_downstream.hpp`, but you still need to connect them to the actual llama.cpp call site that owns the K/V cache tensors.
 
@@ -287,6 +287,6 @@ The generated files are intentionally small and explicit. They wrap real `ggml_t
 
 Likely next engineering steps are:
 
-1. Validate the new reference-only box-center estimator across more prompts, rows, and layers, then port it into the CUDA scan kernel if the improvement holds up.
-2. Expand the score probe beyond the current single-stream/representative-head prototype to broader batching and GQA handling.
+1. Validate the promoted box-center estimator across more prompts, rows, and layers in the downstream llama probe.
+2. Expand the score probe beyond the current single-stream path to broader batching coverage and richer GQA diagnostics.
 3. Add model-level validation and profiler-driven performance work once the downstream bridge starts influencing attention results.

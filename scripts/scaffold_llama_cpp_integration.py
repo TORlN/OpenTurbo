@@ -546,12 +546,12 @@ struct openturbo_shadow_score_summary {
     float component_first_residual = 0.0f;
     float component_mean_main = 0.0f;
     float component_mean_residual = 0.0f;
-    float box_first_score = 0.0f;
-    float box_mean_abs_error = 0.0f;
-    float box_max_abs_error = 0.0f;
-    int64_t box_top_row = -1;
-    float box_top_score = 0.0f;
-    int box_top_match = 0;
+    float legacy_first_score = 0.0f;
+    float legacy_mean_abs_error = 0.0f;
+    float legacy_max_abs_error = 0.0f;
+    int64_t legacy_top_row = -1;
+    float legacy_top_score = 0.0f;
+    int legacy_top_match = 0;
 };
 
 struct openturbo_scan_component_breakdown {
@@ -564,6 +564,14 @@ float openturbo_sign_from_bit(uint32_t bit) {
 }
 
 void openturbo_reconstruct_pair_from_code(uint32_t code, float scale, float & x_hat, float & y_hat) {
+    const uint32_t y_bit = code & 0x1u;
+    const uint32_t x_bit = (code >> 1) & 0x1u;
+    const float center = scale * 0.5f;
+    x_hat = center * openturbo_sign_from_bit(x_bit);
+    y_hat = center * openturbo_sign_from_bit(y_bit);
+}
+
+void openturbo_reconstruct_pair_from_code_corner(uint32_t code, float scale, float & x_hat, float & y_hat) {
     const uint32_t y_bit = code & 0x1u;
     const uint32_t x_bit = (code >> 1) & 0x1u;
     const float center = scale * 0.7071067811865475f;
@@ -800,7 +808,8 @@ float openturbo_fwht_dot(const float * lhs, const float * rhs, int64_t count) {
 openturbo_scan_component_breakdown openturbo_estimate_scan_components(
     const openturbo_packed_tile_header_t * query_headers,
     const openturbo_packed_tile_header_t * cache_headers,
-    int                                    num_query_tiles) {
+    int                                    num_query_tiles,
+    bool                                   use_corner_reconstruction) {
     openturbo_scan_component_breakdown breakdown;
     for (int tile_index = 0; tile_index < num_query_tiles; ++tile_index) {
         const auto & query_header = query_headers[tile_index];
@@ -824,8 +833,13 @@ openturbo_scan_component_breakdown openturbo_estimate_scan_components(
             float qy_hat = 0.0f;
             float kx_hat = 0.0f;
             float ky_hat = 0.0f;
-            openturbo_reconstruct_pair_from_code(q_code, query_scale, qx_hat, qy_hat);
-            openturbo_reconstruct_pair_from_code(k_code, cache_scale, kx_hat, ky_hat);
+            if (use_corner_reconstruction) {
+                openturbo_reconstruct_pair_from_code_corner(q_code, query_scale, qx_hat, qy_hat);
+                openturbo_reconstruct_pair_from_code_corner(k_code, cache_scale, kx_hat, ky_hat);
+            } else {
+                openturbo_reconstruct_pair_from_code(q_code, query_scale, qx_hat, qy_hat);
+                openturbo_reconstruct_pair_from_code(k_code, cache_scale, kx_hat, ky_hat);
+            }
             main_polar_dot += qx_hat * kx_hat + qy_hat * ky_hat;
 
             const int q_bit = ((query_header.qjl_sign_word >> pair_index) & 0x1ull) ? 1 : -1;
@@ -878,7 +892,7 @@ openturbo_shadow_score_summary openturbo_run_shadow_score(const ggml_tensor *   
 
     const int query_head_group = num_query_heads / num_heads;
     std::vector<float> query_values;
-    if (!openturbo_copy_query_block_f32(q_tensor, num_heads, query_head_group, query_values)) {
+    if (!openturbo_copy_query_block_f32(q_tensor, num_query_heads, 1, query_values)) {
         summary.reason = "unsupported_query_layout";
         return summary;
     }
@@ -916,9 +930,9 @@ openturbo_shadow_score_summary openturbo_run_shadow_score(const ggml_tensor *   
     float * device_scores = nullptr;
 
     const size_t query_input_bytes = sizeof(float) * query_values.size();
-    const size_t query_header_count = static_cast<size_t>(num_heads) * static_cast<size_t>(num_query_tiles);
+    const size_t query_header_count = static_cast<size_t>(num_query_heads) * static_cast<size_t>(num_query_tiles);
     const size_t cache_header_count = host_cache_headers.size();
-    const size_t score_count = static_cast<size_t>(num_heads) * active_rows.size();
+    const size_t score_count = static_cast<size_t>(num_query_heads) * active_rows.size();
 
     cuda_status = cudaMalloc(&device_query_input, query_input_bytes);
     if (cuda_status == cudaSuccess) {
@@ -960,11 +974,12 @@ openturbo_shadow_score_summary openturbo_run_shadow_score(const ggml_tensor *   
             goto cleanup;
         }
 
-        for (int head_index = 0; head_index < num_heads; ++head_index) {
+        for (int query_head_index = 0; query_head_index < num_query_heads; ++query_head_index) {
+            const int kv_head_index = query_head_index / query_head_group;
             const openturbo_status_t scan_status = openturbo_scan_query_many_cache_multi_tile(
-                device_query_headers + static_cast<size_t>(head_index * num_query_tiles),
-                device_cache_headers + static_cast<size_t>(head_index) * active_rows.size() * static_cast<size_t>(num_query_tiles),
-                device_scores + static_cast<size_t>(head_index) * active_rows.size(),
+                device_query_headers + static_cast<size_t>(query_head_index * num_query_tiles),
+                device_cache_headers + static_cast<size_t>(kv_head_index) * active_rows.size() * static_cast<size_t>(num_query_tiles),
+                device_scores + static_cast<size_t>(query_head_index) * active_rows.size(),
                 num_query_tiles,
                 static_cast<int>(active_rows.size()),
                 nullptr,
@@ -1006,11 +1021,11 @@ openturbo_shadow_score_summary openturbo_run_shadow_score(const ggml_tensor *   
         float best_score = -INFINITY;
         float best_dense_score = -INFINITY;
         float best_fwht_score = -INFINITY;
-        float best_box_score = -INFINITY;
+        float best_legacy_score = -INFINITY;
         float total_abs_error = 0.0f;
         float total_fwht_abs_error = 0.0f;
         float total_fwht_scale_ratio = 0.0f;
-        float total_box_abs_error = 0.0f;
+        float total_legacy_abs_error = 0.0f;
         float total_component_main = 0.0f;
         float total_component_residual = 0.0f;
         int fwht_scale_ratio_count = 0;
@@ -1024,45 +1039,59 @@ openturbo_shadow_score_summary openturbo_run_shadow_score(const ggml_tensor *   
             float mean_fwht_score = 0.0f;
             float mean_component_main = 0.0f;
             float mean_component_residual = 0.0f;
+            float mean_legacy_main = 0.0f;
+            float mean_legacy_residual = 0.0f;
             const int64_t local_row = active_rows[active_index] - local_row_base;
-            for (int head_index = 0; head_index < num_heads; ++head_index) {
-                const size_t score_offset = static_cast<size_t>(head_index) * active_rows.size() + active_index;
+            for (int query_head_index = 0; query_head_index < num_query_heads; ++query_head_index) {
+                const int kv_head_index = query_head_index / query_head_group;
+                const size_t score_offset = static_cast<size_t>(query_head_index) * active_rows.size() + active_index;
+                const size_t cache_offset = (static_cast<size_t>(kv_head_index) * active_rows.size() + active_index) * static_cast<size_t>(num_query_tiles);
                 mean_score += host_scores[score_offset];
 
                 const auto component_breakdown = openturbo_estimate_scan_components(
-                    host_query_headers.data() + static_cast<size_t>(head_index * num_query_tiles),
-                    host_cache_headers.data() + score_offset * static_cast<size_t>(num_query_tiles),
-                    num_query_tiles);
+                    host_query_headers.data() + static_cast<size_t>(query_head_index * num_query_tiles),
+                    host_cache_headers.data() + cache_offset,
+                    num_query_tiles,
+                    false);
+                const auto legacy_breakdown = openturbo_estimate_scan_components(
+                    host_query_headers.data() + static_cast<size_t>(query_head_index * num_query_tiles),
+                    host_cache_headers.data() + cache_offset,
+                    num_query_tiles,
+                    true);
                 total_component_main += component_breakdown.main_polar_dot;
                 total_component_residual += component_breakdown.residual_correction;
                 mean_component_main += component_breakdown.main_polar_dot;
                 mean_component_residual += component_breakdown.residual_correction;
+                mean_legacy_main += legacy_breakdown.main_polar_dot;
+                mean_legacy_residual += legacy_breakdown.residual_correction;
 
-                if (!openturbo_copy_k_head_row_f32(k_tensor, local_row, head_index, k_row_values)) {
+                if (!openturbo_copy_k_head_row_f32(k_tensor, local_row, kv_head_index, k_row_values)) {
                     summary.reason = "unsupported_k_layout";
                     summary.success = false;
                     goto cleanup;
                 }
 
-                const float * const query_head = query_values.data() + static_cast<size_t>(head_index) * static_cast<size_t>(head_dim);
+                const float * const query_head = query_values.data() + static_cast<size_t>(query_head_index) * static_cast<size_t>(head_dim);
                 mean_dense_score += openturbo_dense_dot(query_head, k_row_values.data(), head_dim);
                 mean_fwht_score += openturbo_fwht_dot(query_head, k_row_values.data(), head_dim);
             }
-            mean_score /= static_cast<float>(num_heads);
-            mean_dense_score /= static_cast<float>(num_heads);
-            mean_fwht_score /= static_cast<float>(num_heads);
-            mean_component_main /= static_cast<float>(num_heads);
-            mean_component_residual /= static_cast<float>(num_heads);
-            const float mean_box_score = 0.5f * mean_component_main + mean_component_residual;
+            mean_score /= static_cast<float>(num_query_heads);
+            mean_dense_score /= static_cast<float>(num_query_heads);
+            mean_fwht_score /= static_cast<float>(num_query_heads);
+            mean_component_main /= static_cast<float>(num_query_heads);
+            mean_component_residual /= static_cast<float>(num_query_heads);
+            mean_legacy_main /= static_cast<float>(num_query_heads);
+            mean_legacy_residual /= static_cast<float>(num_query_heads);
+            const float mean_legacy_score = mean_legacy_main + mean_legacy_residual;
             const float abs_error = std::fabs(mean_score - mean_dense_score);
             const float fwht_abs_error = std::fabs(mean_score - mean_fwht_score);
-            const float box_abs_error = std::fabs(mean_box_score - mean_fwht_score);
+            const float legacy_abs_error = std::fabs(mean_legacy_score - mean_fwht_score);
             total_abs_error += abs_error;
             total_fwht_abs_error += fwht_abs_error;
-            total_box_abs_error += box_abs_error;
+            total_legacy_abs_error += legacy_abs_error;
             summary.max_abs_error = std::max(summary.max_abs_error, abs_error);
             summary.fwht_max_abs_error = std::max(summary.fwht_max_abs_error, fwht_abs_error);
-            summary.box_max_abs_error = std::max(summary.box_max_abs_error, box_abs_error);
+            summary.legacy_max_abs_error = std::max(summary.legacy_max_abs_error, legacy_abs_error);
             if (std::fabs(mean_fwht_score) > 1.0e-6f) {
                 total_fwht_scale_ratio += mean_score / mean_fwht_score;
                 ++fwht_scale_ratio_count;
@@ -1074,7 +1103,7 @@ openturbo_shadow_score_summary openturbo_run_shadow_score(const ggml_tensor *   
                 summary.fwht_first_score = mean_fwht_score;
                 summary.component_first_main = mean_component_main;
                 summary.component_first_residual = mean_component_residual;
-                summary.box_first_score = mean_box_score;
+                summary.legacy_first_score = mean_legacy_score;
             }
             if (mean_score > best_score) {
                 best_score = mean_score;
@@ -1091,10 +1120,10 @@ openturbo_shadow_score_summary openturbo_run_shadow_score(const ggml_tensor *   
                 summary.fwht_top_score = mean_fwht_score;
                 summary.fwht_top_row = active_rows[active_index];
             }
-            if (mean_box_score > best_box_score) {
-                best_box_score = mean_box_score;
-                summary.box_top_score = mean_box_score;
-                summary.box_top_row = active_rows[active_index];
+            if (mean_legacy_score > best_legacy_score) {
+                best_legacy_score = mean_legacy_score;
+                summary.legacy_top_score = mean_legacy_score;
+                summary.legacy_top_row = active_rows[active_index];
             }
         }
 
@@ -1103,10 +1132,10 @@ openturbo_shadow_score_summary openturbo_run_shadow_score(const ggml_tensor *   
         summary.fwht_mean_abs_error = total_fwht_abs_error / static_cast<float>(active_rows.size());
         summary.fwht_top_match = summary.top_row == summary.fwht_top_row ? 1 : 0;
         summary.fwht_mean_scale_ratio = fwht_scale_ratio_count > 0 ? total_fwht_scale_ratio / static_cast<float>(fwht_scale_ratio_count) : 0.0f;
-        summary.component_mean_main = total_component_main / static_cast<float>(active_rows.size() * num_heads);
-        summary.component_mean_residual = total_component_residual / static_cast<float>(active_rows.size() * num_heads);
-        summary.box_mean_abs_error = total_box_abs_error / static_cast<float>(active_rows.size());
-        summary.box_top_match = summary.box_top_row == summary.fwht_top_row ? 1 : 0;
+        summary.component_mean_main = total_component_main / static_cast<float>(active_rows.size() * num_query_heads);
+        summary.component_mean_residual = total_component_residual / static_cast<float>(active_rows.size() * num_query_heads);
+        summary.legacy_mean_abs_error = total_legacy_abs_error / static_cast<float>(active_rows.size());
+        summary.legacy_top_match = summary.legacy_top_row == summary.fwht_top_row ? 1 : 0;
     }
 
 cleanup:
@@ -1239,15 +1268,15 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
                              score_summary.component_mean_main,
                              score_summary.component_mean_residual);
                 std::fprintf(stderr,
-                             "[openturbo] shadow_hypothesis layer=%d status=success node=%s box_top_match=%d box_first=%.6f box_top_row=%lld box_top=%.6f box_mae=%.6f box_max_abs_error=%.6f\\n",
+                             "[openturbo] shadow_legacy layer=%d status=success node=%s corner_top_match=%d corner_first=%.6f corner_top_row=%lld corner_top=%.6f corner_mae=%.6f corner_max_abs_error=%.6f\\n",
                              layer_index,
                              ggml_get_name(tensor),
-                             score_summary.box_top_match,
-                             score_summary.box_first_score,
-                             static_cast<long long>(score_summary.box_top_row),
-                             score_summary.box_top_score,
-                             score_summary.box_mean_abs_error,
-                             score_summary.box_max_abs_error);
+                             score_summary.legacy_top_match,
+                             score_summary.legacy_first_score,
+                             static_cast<long long>(score_summary.legacy_top_row),
+                             score_summary.legacy_top_score,
+                             score_summary.legacy_mean_abs_error,
+                             score_summary.legacy_max_abs_error);
             } else {
                 std::fprintf(stderr,
                              "[openturbo] shadow_score layer=%d status=%s node=%s\\n",
@@ -1265,7 +1294,7 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
                              score_summary.reason,
                              ggml_get_name(tensor));
                 std::fprintf(stderr,
-                             "[openturbo] shadow_hypothesis layer=%d status=%s node=%s\\n",
+                             "[openturbo] shadow_legacy layer=%d status=%s node=%s\\n",
                              layer_index,
                              score_summary.reason,
                              ggml_get_name(tensor));

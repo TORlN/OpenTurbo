@@ -147,18 +147,18 @@ namespace
     void print_reference_calibration(const TileCase &query_case, const TileCase &cache_case)
     {
         const float fwht_exact = compute_fwht_dot(query_case, cache_case);
-        const float corner_estimate = openturbo::estimate_scan_dot(query_case.header, cache_case.header);
-        const float box_estimate = openturbo::estimate_scan_dot_box_center(query_case.header, cache_case.header);
+        const float current_estimate = openturbo::estimate_scan_dot(query_case.header, cache_case.header);
+        const float legacy_corner_estimate = openturbo::estimate_scan_dot_corner(query_case.header, cache_case.header);
 
         std::printf(
-            "CALIBRATION: %s x %s fwht_exact=%f corner=%f box=%f corner_abs_error=%f box_abs_error=%f\n",
+            "CALIBRATION: %s x %s fwht_exact=%f current=%f legacy_corner=%f current_abs_error=%f legacy_corner_abs_error=%f\n",
             query_case.name,
             cache_case.name,
             fwht_exact,
-            corner_estimate,
-            box_estimate,
-            std::fabs(corner_estimate - fwht_exact),
-            std::fabs(box_estimate - fwht_exact));
+            current_estimate,
+            legacy_corner_estimate,
+            std::fabs(current_estimate - fwht_exact),
+            std::fabs(legacy_corner_estimate - fwht_exact));
     }
 
     MultiTileScanCase make_multi_tile_case(

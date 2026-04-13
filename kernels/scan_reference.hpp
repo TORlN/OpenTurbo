@@ -82,15 +82,15 @@ namespace openturbo
         const PackedTileHeader &query_header,
         const PackedTileHeader &cache_header)
     {
-        const ScanDotTerms terms = estimate_scan_dot_terms(query_header, cache_header, false);
+        const ScanDotTerms terms = estimate_scan_dot_terms(query_header, cache_header, true);
         return terms.main_term + terms.residual_term;
     }
 
-    inline float estimate_scan_dot_box_center(
+    inline float estimate_scan_dot_corner(
         const PackedTileHeader &query_header,
         const PackedTileHeader &cache_header)
     {
-        const ScanDotTerms terms = estimate_scan_dot_terms(query_header, cache_header, true);
+        const ScanDotTerms terms = estimate_scan_dot_terms(query_header, cache_header, false);
         return terms.main_term + terms.residual_term;
     }
 
@@ -107,7 +107,7 @@ namespace openturbo
         return total;
     }
 
-    inline float estimate_scan_dot_multi_tile_box_center(
+    inline float estimate_scan_dot_multi_tile_corner(
         const PackedTileHeader *query_headers,
         const PackedTileHeader *cache_headers,
         int num_query_tiles)
@@ -115,7 +115,7 @@ namespace openturbo
         float total = 0.0f;
         for (int tile_index = 0; tile_index < num_query_tiles; ++tile_index)
         {
-            total += estimate_scan_dot_box_center(query_headers[tile_index], cache_headers[tile_index]);
+            total += estimate_scan_dot_corner(query_headers[tile_index], cache_headers[tile_index]);
         }
         return total;
     }

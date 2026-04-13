@@ -32,7 +32,7 @@ SHADOW_READ_PATTERN = re.compile(r"^\[openturbo\] shadow_read .*$", re.MULTILINE
 SHADOW_SCORE_PATTERN = re.compile(r"^\[openturbo\] shadow_score .*$", re.MULTILINE)
 SHADOW_COMPARE_PATTERN = re.compile(r"^\[openturbo\] shadow_compare .*$", re.MULTILINE)
 SHADOW_COMPONENTS_PATTERN = re.compile(r"^\[openturbo\] shadow_components .*$", re.MULTILINE)
-SHADOW_HYPOTHESIS_PATTERN = re.compile(r"^\[openturbo\] shadow_hypothesis .*$", re.MULTILINE)
+SHADOW_LEGACY_PATTERN = re.compile(r"^\[openturbo\] shadow_legacy .*$", re.MULTILINE)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -217,7 +217,7 @@ def parse_probe_output(output: str, returncode: int) -> tuple[str, str, str, str
     shadow_score_match = SHADOW_SCORE_PATTERN.search(output)
     shadow_compare_match = SHADOW_COMPARE_PATTERN.search(output)
     shadow_components_match = SHADOW_COMPONENTS_PATTERN.search(output)
-    shadow_hypothesis_match = SHADOW_HYPOTHESIS_PATTERN.search(output)
+    shadow_legacy_match = SHADOW_LEGACY_PATTERN.search(output)
     if probe_match is None:
         raise RuntimeError(
             "Probe run completed without an OpenTurbo cpy_k probe line. "
@@ -248,9 +248,9 @@ def parse_probe_output(output: str, returncode: int) -> tuple[str, str, str, str
             "Probe run completed without an OpenTurbo shadow_components line. "
             f"Exit code was {returncode}."
         )
-    if shadow_hypothesis_match is None:
+    if shadow_legacy_match is None:
         raise RuntimeError(
-            "Probe run completed without an OpenTurbo shadow_hypothesis line. "
+            "Probe run completed without an OpenTurbo shadow_legacy line. "
             f"Exit code was {returncode}."
         )
 
@@ -261,7 +261,7 @@ def parse_probe_output(output: str, returncode: int) -> tuple[str, str, str, str
         shadow_score_match.group(0),
         shadow_compare_match.group(0),
         shadow_components_match.group(0),
-        shadow_hypothesis_match.group(0),
+        shadow_legacy_match.group(0),
     )
 
 
@@ -317,7 +317,7 @@ def main() -> int:
         model_path = download_hf_model(args.hf_repo, args.hf_file, download_dir)
 
     print(f"Running probe with model {model_path}", flush=True)
-    probe_line, shadow_line, shadow_read_line, shadow_score_line, shadow_compare_line, shadow_components_line, shadow_hypothesis_line = run_probe(runner, model_path, args.prompt, args.seed, args.ngl)
+    probe_line, shadow_line, shadow_read_line, shadow_score_line, shadow_compare_line, shadow_components_line, shadow_legacy_line = run_probe(runner, model_path, args.prompt, args.seed, args.ngl)
 
     print(f"llama_root={llama_root}")
     print(f"build_dir={build_dir}")
@@ -330,7 +330,7 @@ def main() -> int:
     print(shadow_score_line)
     print(shadow_compare_line)
     print(shadow_components_line)
-    print(shadow_hypothesis_line)
+    print(shadow_legacy_line)
     return 0
 
 

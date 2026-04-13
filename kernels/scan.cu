@@ -38,10 +38,10 @@ namespace openturbo
         float kx1;
         float ky1;
 
-        reconstruct_pair_from_code(unpack_quadrant_code(query, pair0), query_scale, qx0, qy0);
-        reconstruct_pair_from_code(unpack_quadrant_code(cache_header, pair0), cache_scale, kx0, ky0);
-        reconstruct_pair_from_code(unpack_quadrant_code(query, pair1), query_scale, qx1, qy1);
-        reconstruct_pair_from_code(unpack_quadrant_code(cache_header, pair1), cache_scale, kx1, ky1);
+        reconstruct_pair_from_code_box_center(unpack_quadrant_code(query, pair0), query_scale, qx0, qy0);
+        reconstruct_pair_from_code_box_center(unpack_quadrant_code(cache_header, pair0), cache_scale, kx0, ky0);
+        reconstruct_pair_from_code_box_center(unpack_quadrant_code(query, pair1), query_scale, qx1, qy1);
+        reconstruct_pair_from_code_box_center(unpack_quadrant_code(cache_header, pair1), cache_scale, kx1, ky1);
 
         float local_dot = qx0 * kx0 + qy0 * ky0;
         local_dot += qx1 * kx1 + qy1 * ky1;
