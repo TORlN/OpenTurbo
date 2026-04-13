@@ -180,14 +180,31 @@ This repo should currently be treated as a kernel and integration prototype.
 Known limitations:
 
 * The repo still does not build against ggml directly; the `ggml_tensor` bridge is header-only and is meant to be compiled inside a downstream llama.cpp or ggml tree.
+* A real llama.cpp integration still requires a downstream checkout, but OpenTurbo can now generate a bridge scaffold for that tree programmatically.
 * The project is currently Windows-first for CUDA development.
 * The Python tensor layer uses duck typing and does not enforce a specific framework.
 * The packed-header format and ABI are still young enough that downstream integrations should treat them as evolving.
+
+## Programmatic Scaffold
+
+If you do not want to wire the downstream bridge by hand, OpenTurbo can generate a drop-in scaffold into an existing llama.cpp checkout or a fresh destination directory:
+
+```powershell
+.venv\Scripts\python.exe scripts\scaffold_llama_cpp_integration.py C:\path\to\llama.cpp
+```
+
+To clone llama.cpp and generate the scaffold in one step:
+
+```powershell
+.venv\Scripts\python.exe scripts\scaffold_llama_cpp_integration.py C:\path\to\llama.cpp --clone-if-missing
+```
+
+The generated files are intentionally small and explicit. They wrap real `ggml_tensor` objects through `include/openturbo/ggml_downstream.hpp`, but you still need to connect them to the actual llama.cpp call site that owns the K/V cache tensors.
 
 ## Next Work
 
 Likely next engineering steps are:
 
-1. Wire `include/openturbo/ggml_downstream.hpp` into an actual llama.cpp integration point that owns real `ggml_tensor` KV caches.
+1. Wire the generated scaffold and `include/openturbo/ggml_downstream.hpp` into an actual llama.cpp integration point that owns real `ggml_tensor` KV caches.
 2. Extend the shim from all-head dispatch to sequence-aware integration flows that handle multiple tokens per launch site.
 3. Add model-level validation and profiler-driven performance work once the downstream bridge is exercised in a real model path.
