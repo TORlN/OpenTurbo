@@ -76,14 +76,15 @@ def encode_tile_fused(
 ) -> None:
     """Launch the fused encoder on raw device pointers."""
     require_cuda_extension()
-    _native.encode_tile_fused(
-        _coerce_ptr(input_ptr, "input_ptr"),
-        _coerce_ptr(output_headers_ptr, "output_headers_ptr"),
-        int(num_tiles),
-        int(token_pos),
-        float(rope_theta),
-        0 if stream_handle is None else _coerce_ptr(stream_handle, "stream_handle"),
-    )
+    if _native:
+        _native.encode_tile_fused(
+            _coerce_ptr(input_ptr, "input_ptr"),
+            _coerce_ptr(output_headers_ptr, "output_headers_ptr"),
+            int(num_tiles),
+            int(token_pos),
+            float(rope_theta),
+            0 if stream_handle is None else _coerce_ptr(stream_handle, "stream_handle"),
+        )
 
 
 def scan_query_many_cache(
@@ -95,13 +96,14 @@ def scan_query_many_cache(
 ) -> None:
     """Launch the one-query-header versus many-cache-headers scan kernel."""
     require_cuda_extension()
-    _native.scan_query_many_cache(
-        _coerce_ptr(query_header_ptr, "query_header_ptr"),
-        _coerce_ptr(cache_headers_ptr, "cache_headers_ptr"),
-        _coerce_ptr(output_ptr, "output_ptr"),
-        int(num_cache_tiles),
-        0 if stream_handle is None else _coerce_ptr(stream_handle, "stream_handle"),
-    )
+    if _native:
+        _native.scan_query_many_cache(
+            _coerce_ptr(query_header_ptr, "query_header_ptr"),
+            _coerce_ptr(cache_headers_ptr, "cache_headers_ptr"),
+            _coerce_ptr(output_ptr, "output_ptr"),
+            int(num_cache_tiles),
+            0 if stream_handle is None else _coerce_ptr(stream_handle, "stream_handle"),
+        )
 
 
 def scan_query_many_cache_multi_tile(
@@ -114,11 +116,12 @@ def scan_query_many_cache_multi_tile(
 ) -> None:
     """Launch the multi-tile query head versus many cache tokens scan kernel."""
     require_cuda_extension()
-    _native.scan_query_many_cache_multi_tile(
-        _coerce_ptr(query_headers_ptr, "query_headers_ptr"),
-        _coerce_ptr(cache_headers_ptr, "cache_headers_ptr"),
-        _coerce_ptr(output_ptr, "output_ptr"),
-        int(num_query_tiles),
-        int(num_cache_tokens),
-        0 if stream_handle is None else _coerce_ptr(stream_handle, "stream_handle"),
-    )
+    if _native:
+        _native.scan_query_many_cache_multi_tile(
+            _coerce_ptr(query_headers_ptr, "query_headers_ptr"),
+            _coerce_ptr(cache_headers_ptr, "cache_headers_ptr"),
+            _coerce_ptr(output_ptr, "output_ptr"),
+            int(num_query_tiles),
+            int(num_cache_tokens),
+            0 if stream_handle is None else _coerce_ptr(stream_handle, "stream_handle"),
+        )

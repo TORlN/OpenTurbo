@@ -9,11 +9,13 @@ from .cuda_api import (
 	scan_query_many_cache_multi_tile,
 )
 from .cuda_runtime import (
+	cuda_device_count,
 	cuda_device_synchronize,
 	cuda_free,
 	cuda_malloc,
 	cuda_memcpy_device_to_host,
 	cuda_memcpy_host_to_device,
+	is_cuda_device_available,
 )
 from .tensor_api import (
 	encode_tile_fused_tensor,
@@ -33,7 +35,9 @@ __all__ = [
 	"cuda_free",
 	"cuda_memcpy_host_to_device",
 	"cuda_memcpy_device_to_host",
+	"cuda_device_count",
 	"cuda_device_synchronize",
+	"is_cuda_device_available",
 	"encode_tile_fused_tensor",
 	"scan_query_many_cache_tensor",
 	"scan_query_many_cache_multi_tile_tensor",

@@ -28,3 +28,27 @@ jobs:
       - name: Run tests
         run: |
           pytest -q
+
+  windows-cuda-build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.24
+        with:
+          cuda: '12.6.3'
+          method: 'network'
+      - name: Install Python test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Build editable CUDA bindings
+        shell: cmd
+        run: scripts\install_cuda_bindings.bat
+      - name: Run tests
+        run: |
+          pytest -q

@@ -5,8 +5,25 @@ set "WORKSPACE_DIR=%~dp0.."
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 set "VSINSTALL="
 set "VSDEVCMD="
-set "NVCC=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe"
+set "NVCC="
 set "PYTHON=%WORKSPACE_DIR%\.venv\Scripts\python.exe"
+
+if defined CUDA_PATH if exist "%CUDA_PATH%\bin\nvcc.exe" (
+    set "NVCC=%CUDA_PATH%\bin\nvcc.exe"
+)
+
+if not defined NVCC if exist "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe" (
+    set "NVCC=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.6\bin\nvcc.exe"
+)
+
+if not defined NVCC (
+    for /f "delims=" %%I in ('where nvcc 2^>nul') do (
+        set "NVCC=%%I"
+        goto :found_nvcc
+    )
+)
+
+:found_nvcc
 
 if exist "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat" (
     set "VSDEVCMD=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat"

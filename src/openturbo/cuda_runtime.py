@@ -54,6 +54,9 @@ def _cudart() -> ctypes.WinDLL:
         _CUDART.cudaMemcpy.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
         _CUDART.cudaMemcpy.restype = ctypes.c_int
 
+        _CUDART.cudaGetDeviceCount.argtypes = [ctypes.POINTER(ctypes.c_int)]
+        _CUDART.cudaGetDeviceCount.restype = ctypes.c_int
+
         _CUDART.cudaDeviceSynchronize.argtypes = []
         _CUDART.cudaDeviceSynchronize.restype = ctypes.c_int
 
@@ -78,6 +81,8 @@ def cuda_malloc(num_bytes: int) -> int:
 
     ptr = ctypes.c_void_p()
     _check_cuda(_cudart().cudaMalloc(ctypes.byref(ptr), num_bytes), "cudaMalloc")
+    if ptr.value is None:
+        raise RuntimeError("cudaMalloc returned a null pointer")
     return int(ptr.value)
 
 
@@ -118,3 +123,16 @@ def cuda_memcpy_device_to_host(device_ptr: int, num_bytes: int) -> bytes:
 
 def cuda_device_synchronize() -> None:
     _check_cuda(_cudart().cudaDeviceSynchronize(), "cudaDeviceSynchronize")
+
+
+def cuda_device_count() -> int:
+    count = ctypes.c_int()
+    _check_cuda(_cudart().cudaGetDeviceCount(ctypes.byref(count)), "cudaGetDeviceCount")
+    return int(count.value)
+
+
+def is_cuda_device_available() -> bool:
+    try:
+        return cuda_device_count() > 0
+    except RuntimeError:
+        return False
