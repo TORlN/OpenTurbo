@@ -7,7 +7,8 @@ extern "C"
 {
 #endif
 
-#define OPENTURBO_LLAMA_LAYOUT_FLAT_TILES 0u
+#define OPENTURBO_LLAMA_LAYOUT_KV_TILES_V1 0u
+#define OPENTURBO_LLAMA_LAYOUT_FLAT_TILES OPENTURBO_LLAMA_LAYOUT_KV_TILES_V1
 
     typedef struct openturbo_llama_encode_request_t
     {

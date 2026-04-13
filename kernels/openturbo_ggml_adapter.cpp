@@ -8,6 +8,11 @@
 
 namespace
 {
+    bool has_rank(const openturbo_ggml_tensor_view_t &view, int32_t expected_rank)
+    {
+        return view.n_dims == expected_rank;
+    }
+
     uint64_t element_count(const openturbo_ggml_tensor_view_t &view)
     {
         uint64_t count = 1;
@@ -69,6 +74,65 @@ namespace
     {
         return element_count(view) == expected_count;
     }
+
+    bool is_encode_input_layout(const openturbo_ggml_tensor_view_t &view)
+    {
+        return view.element_type == OPENTURBO_GGML_TYPE_F32 &&
+               has_rank(view, OPENTURBO_GGML_ENCODE_INPUT_RANK) &&
+               view.ne[OPENTURBO_GGML_DIM_TILE_VALUES] == OPENTURBO_TILE_DIMS &&
+               view.ne[OPENTURBO_GGML_DIM_TILE_INDEX] > 0 &&
+               is_contiguous(view);
+    }
+
+    bool is_encode_output_layout(const openturbo_ggml_tensor_view_t &view, uint64_t num_tiles)
+    {
+        return view.element_type == OPENTURBO_GGML_TYPE_PACKED_TILE_HEADER &&
+               has_rank(view, OPENTURBO_GGML_ENCODE_OUTPUT_RANK) &&
+               is_contiguous(view) &&
+               has_exact_element_count(view, num_tiles);
+    }
+
+    bool is_single_query_layout(const openturbo_ggml_tensor_view_t &view)
+    {
+        return view.element_type == OPENTURBO_GGML_TYPE_PACKED_TILE_HEADER &&
+               has_rank(view, OPENTURBO_GGML_SCAN_SINGLE_QUERY_RANK) &&
+               is_contiguous(view) &&
+               has_exact_element_count(view, 1);
+    }
+
+    bool is_single_cache_layout(const openturbo_ggml_tensor_view_t &view)
+    {
+        return view.element_type == OPENTURBO_GGML_TYPE_PACKED_TILE_HEADER &&
+               has_rank(view, OPENTURBO_GGML_SCAN_SINGLE_CACHE_RANK) &&
+               is_contiguous(view) &&
+               element_count(view) > 0;
+    }
+
+    bool is_multi_query_layout(const openturbo_ggml_tensor_view_t &view, int num_query_tiles)
+    {
+        return view.element_type == OPENTURBO_GGML_TYPE_PACKED_TILE_HEADER &&
+               has_rank(view, OPENTURBO_GGML_SCAN_MULTI_QUERY_RANK) &&
+               is_contiguous(view) &&
+               has_exact_element_count(view, static_cast<uint64_t>(num_query_tiles));
+    }
+
+    bool is_multi_cache_layout(const openturbo_ggml_tensor_view_t &view, int num_query_tiles, int num_cache_tokens)
+    {
+        return view.element_type == OPENTURBO_GGML_TYPE_PACKED_TILE_HEADER &&
+               has_rank(view, OPENTURBO_GGML_SCAN_MULTI_CACHE_RANK) &&
+               view.ne[0] == num_query_tiles &&
+               view.ne[1] == num_cache_tokens &&
+               is_contiguous(view) &&
+               has_exact_element_count(view, static_cast<uint64_t>(num_query_tiles) * static_cast<uint64_t>(num_cache_tokens));
+    }
+
+    bool is_output_layout(const openturbo_ggml_tensor_view_t &view, int num_cache_tokens)
+    {
+        return view.element_type == OPENTURBO_GGML_TYPE_F32 &&
+               has_rank(view, OPENTURBO_GGML_SCAN_OUTPUT_RANK) &&
+               is_contiguous(view) &&
+               has_exact_element_count(view, static_cast<uint64_t>(num_cache_tokens));
+    }
 }
 
 extern "C" OPENTURBO_CAPI openturbo_status_t openturbo_ggml_encode(
@@ -84,21 +148,14 @@ extern "C" OPENTURBO_CAPI openturbo_status_t openturbo_ggml_encode(
         return OPENTURBO_STATUS_INVALID_ARGUMENT;
     }
 
-    if (input->element_type != OPENTURBO_GGML_TYPE_F32 ||
-        output_headers->element_type != OPENTURBO_GGML_TYPE_PACKED_TILE_HEADER ||
-        !is_contiguous(*input) || !is_contiguous(*output_headers))
+    if (!is_encode_input_layout(*input))
     {
         return OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT;
     }
 
     const uint64_t input_elements = element_count(*input);
-    if (input_elements == 0 || (input_elements % OPENTURBO_TILE_DIMS) != 0)
-    {
-        return OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT;
-    }
-
     const uint64_t num_tiles = input_elements / OPENTURBO_TILE_DIMS;
-    if (!has_exact_element_count(*output_headers, num_tiles))
+    if (!is_encode_output_layout(*output_headers, num_tiles))
     {
         return OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT;
     }
@@ -125,20 +182,14 @@ extern "C" OPENTURBO_CAPI openturbo_status_t openturbo_ggml_scan_query_many_cach
         return OPENTURBO_STATUS_INVALID_ARGUMENT;
     }
 
-    if (query_header->element_type != OPENTURBO_GGML_TYPE_PACKED_TILE_HEADER ||
-        cache_headers->element_type != OPENTURBO_GGML_TYPE_PACKED_TILE_HEADER ||
-        output->element_type != OPENTURBO_GGML_TYPE_F32 ||
-        !is_contiguous(*query_header) ||
-        !is_contiguous(*cache_headers) ||
-        !is_contiguous(*output))
+    if (!is_single_query_layout(*query_header) ||
+        !is_single_cache_layout(*cache_headers))
     {
         return OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT;
     }
 
     const uint64_t cache_count = element_count(*cache_headers);
-    if (!has_exact_element_count(*query_header, 1) ||
-        cache_count == 0 ||
-        !has_exact_element_count(*output, cache_count))
+    if (!is_output_layout(*output, static_cast<int>(cache_count)))
     {
         return OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT;
     }
@@ -166,19 +217,9 @@ extern "C" OPENTURBO_CAPI openturbo_status_t openturbo_ggml_scan_query_many_cach
         return OPENTURBO_STATUS_INVALID_ARGUMENT;
     }
 
-    if (query_headers->element_type != OPENTURBO_GGML_TYPE_PACKED_TILE_HEADER ||
-        cache_headers->element_type != OPENTURBO_GGML_TYPE_PACKED_TILE_HEADER ||
-        output->element_type != OPENTURBO_GGML_TYPE_F32 ||
-        !is_contiguous(*query_headers) ||
-        !is_contiguous(*cache_headers) ||
-        !is_contiguous(*output))
-    {
-        return OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT;
-    }
-
-    if (!has_exact_element_count(*query_headers, static_cast<uint64_t>(num_query_tiles)) ||
-        !has_exact_element_count(*cache_headers, static_cast<uint64_t>(num_query_tiles) * static_cast<uint64_t>(num_cache_tokens)) ||
-        !has_exact_element_count(*output, static_cast<uint64_t>(num_cache_tokens)))
+    if (!is_multi_query_layout(*query_headers, num_query_tiles) ||
+        !is_multi_cache_layout(*cache_headers, num_query_tiles, num_cache_tokens) ||
+        !is_output_layout(*output, num_cache_tokens))
     {
         return OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT;
     }

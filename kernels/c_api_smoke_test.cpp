@@ -29,7 +29,7 @@ namespace
         return false;
     }
 
-    openturbo_ggml_tensor_view_t make_contiguous_view(void *data, uint32_t element_type, int64_t element_count)
+    openturbo_ggml_tensor_view_t make_contiguous_1d_view(void *data, uint32_t element_type, int64_t element_count)
     {
         openturbo_ggml_tensor_view_t view{};
         view.data = data;
@@ -37,6 +37,19 @@ namespace
         view.n_dims = 1;
         view.ne[0] = element_count;
         view.nb[0] = (element_type == OPENTURBO_GGML_TYPE_F32) ? 4u : OPENTURBO_PACKED_TILE_HEADER_BYTES;
+        return view;
+    }
+
+    openturbo_ggml_tensor_view_t make_contiguous_2d_view(void *data, uint32_t element_type, int64_t dim0, int64_t dim1)
+    {
+        openturbo_ggml_tensor_view_t view{};
+        view.data = data;
+        view.element_type = element_type;
+        view.n_dims = 2;
+        view.ne[0] = dim0;
+        view.ne[1] = dim1;
+        view.nb[0] = (element_type == OPENTURBO_GGML_TYPE_F32) ? 4u : OPENTURBO_PACKED_TILE_HEADER_BYTES;
+        view.nb[1] = view.nb[0] * static_cast<uint64_t>(dim0);
         return view;
     }
 
@@ -136,8 +149,8 @@ int main()
             break;
         }
 
-        const openturbo_ggml_tensor_view_t input_view = make_contiguous_view(device_input, OPENTURBO_GGML_TYPE_F32, OPENTURBO_TILE_DIMS);
-        const openturbo_ggml_tensor_view_t output_view = make_contiguous_view(device_headers, OPENTURBO_GGML_TYPE_PACKED_TILE_HEADER, 1);
+        const openturbo_ggml_tensor_view_t input_view = make_contiguous_2d_view(device_input, OPENTURBO_GGML_TYPE_F32, OPENTURBO_TILE_DIMS, 1);
+        const openturbo_ggml_tensor_view_t output_view = make_contiguous_1d_view(device_headers, OPENTURBO_GGML_TYPE_PACKED_TILE_HEADER, 1);
         const openturbo_stream_context_t stream_context{nullptr, OPENTURBO_STREAM_CONTEXT_DEFAULT};
 
         if (!check_status(
@@ -234,9 +247,9 @@ int main()
             break;
         }
 
-        const openturbo_ggml_tensor_view_t query_view = make_contiguous_view(device_query_header, OPENTURBO_GGML_TYPE_PACKED_TILE_HEADER, 1);
-        const openturbo_ggml_tensor_view_t cache_view = make_contiguous_view(device_cache_headers, OPENTURBO_GGML_TYPE_PACKED_TILE_HEADER, static_cast<int64_t>(single_tile_cache_headers.size()));
-        const openturbo_ggml_tensor_view_t output_scan_view = make_contiguous_view(device_scan_output, OPENTURBO_GGML_TYPE_F32, static_cast<int64_t>(host_single_tile_scan.size()));
+        const openturbo_ggml_tensor_view_t query_view = make_contiguous_1d_view(device_query_header, OPENTURBO_GGML_TYPE_PACKED_TILE_HEADER, 1);
+        const openturbo_ggml_tensor_view_t cache_view = make_contiguous_1d_view(device_cache_headers, OPENTURBO_GGML_TYPE_PACKED_TILE_HEADER, static_cast<int64_t>(single_tile_cache_headers.size()));
+        const openturbo_ggml_tensor_view_t output_scan_view = make_contiguous_1d_view(device_scan_output, OPENTURBO_GGML_TYPE_F32, static_cast<int64_t>(host_single_tile_scan.size()));
 
         if (!check_status(
                 "openturbo_ggml_scan_query_many_cache",
@@ -351,9 +364,33 @@ int main()
             break;
         }
 
-        const openturbo_ggml_tensor_view_t multi_query_view = make_contiguous_view(device_multi_query_headers, OPENTURBO_GGML_TYPE_PACKED_TILE_HEADER, static_cast<int64_t>(multi_query_headers.size()));
-        const openturbo_ggml_tensor_view_t multi_cache_view = make_contiguous_view(device_multi_cache_headers, OPENTURBO_GGML_TYPE_PACKED_TILE_HEADER, static_cast<int64_t>(multi_cache_headers.size()));
-        const openturbo_ggml_tensor_view_t multi_output_view = make_contiguous_view(device_scan_output, OPENTURBO_GGML_TYPE_F32, static_cast<int64_t>(host_multi_tile_scan.size()));
+        const openturbo_ggml_tensor_view_t multi_query_view = make_contiguous_1d_view(device_multi_query_headers, OPENTURBO_GGML_TYPE_PACKED_TILE_HEADER, static_cast<int64_t>(multi_query_headers.size()));
+        const openturbo_ggml_tensor_view_t multi_cache_view = make_contiguous_2d_view(device_multi_cache_headers, OPENTURBO_GGML_TYPE_PACKED_TILE_HEADER, 2, 2);
+        const openturbo_ggml_tensor_view_t multi_output_view = make_contiguous_1d_view(device_scan_output, OPENTURBO_GGML_TYPE_F32, static_cast<int64_t>(host_multi_tile_scan.size()));
+
+        openturbo_ggml_tensor_view_t invalid_encode_input_view = input_view;
+        invalid_encode_input_view.n_dims = 1;
+        if (openturbo_ggml_encode(&invalid_encode_input_view, &output_view, 13, 10000.0f, stream_context, &cuda_status) != OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT)
+        {
+            cudaFree(device_multi_cache_headers);
+            cudaFree(device_multi_query_headers);
+            cudaFree(device_cache_headers);
+            cudaFree(device_query_header);
+            std::cerr << "ggml encode validation did not reject invalid rank" << std::endl;
+            break;
+        }
+
+        openturbo_ggml_tensor_view_t invalid_encode_stride_view = input_view;
+        invalid_encode_stride_view.nb[1] += 4;
+        if (openturbo_ggml_encode(&invalid_encode_stride_view, &output_view, 13, 10000.0f, stream_context, &cuda_status) != OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT)
+        {
+            cudaFree(device_multi_cache_headers);
+            cudaFree(device_multi_query_headers);
+            cudaFree(device_cache_headers);
+            cudaFree(device_query_header);
+            std::cerr << "ggml encode validation did not reject invalid stride" << std::endl;
+            break;
+        }
 
         if (!check_status(
                 "openturbo_ggml_scan_query_many_cache_multi_tile",
@@ -421,13 +458,25 @@ int main()
             break;
         }
 
+        openturbo_ggml_tensor_view_t invalid_multi_cache_stride_view = multi_cache_view;
+        invalid_multi_cache_stride_view.nb[1] += OPENTURBO_PACKED_TILE_HEADER_BYTES;
+        if (openturbo_ggml_scan_query_many_cache_multi_tile(&multi_query_view, &invalid_multi_cache_stride_view, &multi_output_view, 2, 2, stream_context, &cuda_status) != OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT)
+        {
+            cudaFree(device_multi_cache_headers);
+            cudaFree(device_multi_query_headers);
+            cudaFree(device_cache_headers);
+            cudaFree(device_query_header);
+            std::cerr << "ggml multi-tile layout validation did not reject invalid cache stride" << std::endl;
+            break;
+        }
+
         const openturbo_llama_encode_request_t llama_encode_request{
             input_view,
             output_view,
             13,
             10000.0f,
             stream_context,
-            OPENTURBO_LLAMA_LAYOUT_FLAT_TILES};
+            OPENTURBO_LLAMA_LAYOUT_KV_TILES_V1};
         if (!check_status(
                 "openturbo_llama_encode",
                 openturbo_llama_encode(&llama_encode_request, &cuda_status),
@@ -447,7 +496,7 @@ int main()
             1,
             static_cast<int>(single_tile_cache_headers.size()),
             stream_context,
-            OPENTURBO_LLAMA_LAYOUT_FLAT_TILES};
+            OPENTURBO_LLAMA_LAYOUT_KV_TILES_V1};
         if (!check_status(
                 "openturbo_llama_scan(single)",
                 openturbo_llama_scan(&llama_single_scan_request, &cuda_status),
@@ -467,7 +516,7 @@ int main()
             2,
             2,
             stream_context,
-            OPENTURBO_LLAMA_LAYOUT_FLAT_TILES};
+            OPENTURBO_LLAMA_LAYOUT_KV_TILES_V1};
         if (!check_status(
                 "openturbo_llama_scan(multi)",
                 openturbo_llama_scan(&llama_multi_scan_request, &cuda_status),
