@@ -30,28 +30,61 @@ if(OPENTURBO_BUILD_CUDA)
     find_package(CUDAToolkit REQUIRED)
     find_package(pybind11 CONFIG REQUIRED)
 
-    pybind11_add_module(_openturbo_cuda MODULE
-        src/openturbo/_pybind_shim.cpp
+    add_library(openturbo_cuda_core STATIC
         kernels/encoder.cu
         kernels/scan.cu
     )
 
-    target_include_directories(_openturbo_cuda
-        PRIVATE
+    target_include_directories(openturbo_cuda_core
+        PUBLIC
             ${CMAKE_CURRENT_SOURCE_DIR}/kernels
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
     )
 
-    target_link_libraries(_openturbo_cuda
+    target_link_libraries(openturbo_cuda_core
         PRIVATE
             CUDA::cudart
     )
 
-    set_target_properties(_openturbo_cuda PROPERTIES
+    set_target_properties(openturbo_cuda_core PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
+        POSITION_INDEPENDENT_CODE ON
     )
 
-    install(TARGETS _openturbo_cuda
+    add_library(openturbo_c_api SHARED
+        kernels/openturbo_c_api.cu
+    )
+
+    target_include_directories(openturbo_c_api
+        PUBLIC
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+        PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/kernels
+    )
+
+    target_link_libraries(openturbo_c_api
+        PRIVATE
+            openturbo_cuda_core
+            CUDA::cudart
+    )
+
+    target_compile_definitions(openturbo_c_api PRIVATE OPENTURBO_CAPI_EXPORTS)
+
+    pybind11_add_module(_openturbo_cuda MODULE
+        src/openturbo/_pybind_shim.cpp
+    )
+
+    target_link_libraries(_openturbo_cuda
+        PRIVATE
+            openturbo_cuda_core
+            CUDA::cudart
+    )
+
+    install(TARGETS _openturbo_cuda openturbo_c_api
         LIBRARY DESTINATION openturbo
         RUNTIME DESTINATION openturbo
+        ARCHIVE DESTINATION openturbo
     )
+
+    install(FILES include/openturbo/c_api.h DESTINATION include/openturbo)
 endif()

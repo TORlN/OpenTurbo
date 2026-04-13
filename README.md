@@ -71,3 +71,10 @@ The package now exposes three progressively higher-level entry points:
 * Raw launch wrappers in `openturbo.cuda_api` for integer device pointers.
 * Minimal CUDA runtime helpers in `openturbo.cuda_runtime` for Python-side device allocation and copies.
 * Tensor-style bridge helpers in `openturbo.tensor_api` for CUDA tensor-like objects that expose `data_ptr()`.
+
+## Native Integration Layers
+
+The CUDA build now exposes two native integration surfaces above the kernel wrappers:
+
+* A shared internal CUDA core used by both the Python extension and the exported C ABI.
+* An exported C header at `include/openturbo/c_api.h` for future ggml / llama.cpp integration without pybind11.
