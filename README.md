@@ -71,6 +71,7 @@ Important files:
 * `kernels/openturbo_ggml_adapter.cpp`: ggml-style tensor adapter layer.
 * `include/openturbo/c_api.h`: versioned public C ABI.
 * `include/openturbo/ggml_adapter.h`: flat tensor adapter contract for future ggml integration.
+* `include/openturbo/llama_bridge.h`: dependency-free request layer intended for a downstream llama.cpp shim.
 * `src/openturbo/cuda_api.py`: raw pointer-based Python wrapper API.
 * `src/openturbo/tensor_api.py`: tensor-like Python wrapper layer.
 
@@ -137,6 +138,7 @@ The native side currently exposes:
 * `openturbo_c_api`: shared library exposing a stable C ABI.
 * `include/openturbo/c_api.h`: public ABI with explicit version and status codes.
 * `include/openturbo/ggml_adapter.h`: early ggml-style adapter API over flat tensor metadata.
+* `include/openturbo/llama_bridge.h`: a thin request-oriented bridge layer that downstream llama.cpp code can call without including pybind11 or directly depending on the lower-level adapter entry points.
 
 The C ABI intentionally separates OpenTurbo status from raw CUDA status:
 
@@ -151,6 +153,7 @@ Local validation currently includes:
 * Encoder smoke test executable.
 * Scan smoke test executable.
 * Native C ABI smoke test executable covering encode plus both scan entry points.
+* Native failure-path checks for malformed ggml-style and llama-bridge requests.
 * Python unit and smoke tests.
 
 GitHub Actions currently does the following:
@@ -176,5 +179,5 @@ Known limitations:
 Likely next engineering steps are:
 
 1. Expand native smoke coverage to the scan-side C ABI entry points.
-2. Tighten the ggml adapter around exact KV-cache rank, count, and stride contracts.
-3. Add a real llama.cpp-side bridge layer once the adapter contract stabilizes.
+2. Tighten the ggml adapter around exact KV-cache rank, count, and stride contracts for real ggml tensor layouts rather than the current flat-tile compatibility view.
+3. Replace the dependency-free llama bridge request layer with a real llama.cpp-side shim in the downstream integration tree.

@@ -1,5 +1,6 @@
 #include "../include/openturbo/c_api.h"
 #include "../include/openturbo/ggml_adapter.h"
+#include "../include/openturbo/llama_bridge.h"
 #include "scan_reference.hpp"
 
 #include <cuda_runtime.h>
@@ -393,6 +394,101 @@ int main()
             cudaFree(device_cache_headers);
             cudaFree(device_query_header);
             std::cerr << "ggml single-tile layout validation did not reject invalid query shape" << std::endl;
+            break;
+        }
+
+        openturbo_ggml_tensor_view_t invalid_output_view = output_scan_view;
+        invalid_output_view.ne[0] = 1;
+        if (openturbo_ggml_scan_query_many_cache(&query_view, &cache_view, &invalid_output_view, stream_context, &cuda_status) != OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT)
+        {
+            cudaFree(device_multi_cache_headers);
+            cudaFree(device_multi_query_headers);
+            cudaFree(device_cache_headers);
+            cudaFree(device_query_header);
+            std::cerr << "ggml single-tile layout validation did not reject undersized output" << std::endl;
+            break;
+        }
+
+        openturbo_ggml_tensor_view_t invalid_multi_cache_view = multi_cache_view;
+        invalid_multi_cache_view.ne[0] = 3;
+        if (openturbo_ggml_scan_query_many_cache_multi_tile(&multi_query_view, &invalid_multi_cache_view, &multi_output_view, 2, 2, stream_context, &cuda_status) != OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT)
+        {
+            cudaFree(device_multi_cache_headers);
+            cudaFree(device_multi_query_headers);
+            cudaFree(device_cache_headers);
+            cudaFree(device_query_header);
+            std::cerr << "ggml multi-tile layout validation did not reject invalid cache count" << std::endl;
+            break;
+        }
+
+        const openturbo_llama_encode_request_t llama_encode_request{
+            input_view,
+            output_view,
+            13,
+            10000.0f,
+            stream_context,
+            OPENTURBO_LLAMA_LAYOUT_FLAT_TILES};
+        if (!check_status(
+                "openturbo_llama_encode",
+                openturbo_llama_encode(&llama_encode_request, &cuda_status),
+                cuda_status))
+        {
+            cudaFree(device_multi_cache_headers);
+            cudaFree(device_multi_query_headers);
+            cudaFree(device_cache_headers);
+            cudaFree(device_query_header);
+            break;
+        }
+
+        const openturbo_llama_scan_request_t llama_single_scan_request{
+            query_view,
+            cache_view,
+            output_scan_view,
+            1,
+            static_cast<int>(single_tile_cache_headers.size()),
+            stream_context,
+            OPENTURBO_LLAMA_LAYOUT_FLAT_TILES};
+        if (!check_status(
+                "openturbo_llama_scan(single)",
+                openturbo_llama_scan(&llama_single_scan_request, &cuda_status),
+                cuda_status))
+        {
+            cudaFree(device_multi_cache_headers);
+            cudaFree(device_multi_query_headers);
+            cudaFree(device_cache_headers);
+            cudaFree(device_query_header);
+            break;
+        }
+
+        const openturbo_llama_scan_request_t llama_multi_scan_request{
+            multi_query_view,
+            multi_cache_view,
+            multi_output_view,
+            2,
+            2,
+            stream_context,
+            OPENTURBO_LLAMA_LAYOUT_FLAT_TILES};
+        if (!check_status(
+                "openturbo_llama_scan(multi)",
+                openturbo_llama_scan(&llama_multi_scan_request, &cuda_status),
+                cuda_status))
+        {
+            cudaFree(device_multi_cache_headers);
+            cudaFree(device_multi_query_headers);
+            cudaFree(device_cache_headers);
+            cudaFree(device_query_header);
+            break;
+        }
+
+        openturbo_llama_scan_request_t invalid_llama_request = llama_single_scan_request;
+        invalid_llama_request.layout = 99u;
+        if (openturbo_llama_scan(&invalid_llama_request, &cuda_status) != OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT)
+        {
+            cudaFree(device_multi_cache_headers);
+            cudaFree(device_multi_query_headers);
+            cudaFree(device_cache_headers);
+            cudaFree(device_query_header);
+            std::cerr << "llama bridge did not reject unsupported layout id" << std::endl;
             break;
         }
 

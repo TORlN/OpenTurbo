@@ -1,4 +1,6 @@
+#ifndef OPENTURBO_CAPI_EXPORTS
 #define OPENTURBO_CAPI_EXPORTS
+#endif
 
 #include "../include/openturbo/ggml_adapter.h"
 
