@@ -13,6 +13,12 @@ namespace openturbo
         float rope_theta,
         cudaStream_t stream = nullptr);
 
+    cudaError_t launch_encode_tile_fused_prerotated(
+        const float *input,
+        PackedTileHeader *output_headers,
+        int num_tiles,
+        cudaStream_t stream = nullptr);
+
     cudaError_t launch_scan_query_many_cache(
         const PackedTileHeader *query_header,
         const PackedTileHeader *cache_headers,
@@ -83,6 +89,25 @@ PYBIND11_MODULE(_openturbo_cuda, module)
         py::arg("num_tiles"),
         py::arg("token_pos"),
         py::arg("rope_theta"),
+        py::arg("stream_handle") = static_cast<std::uintptr_t>(0));
+
+    module.def(
+        "encode_tile_fused_prerotated",
+        [](std::uintptr_t input_ptr,
+           std::uintptr_t output_headers_ptr,
+           int num_tiles,
+           std::uintptr_t stream_handle)
+        {
+            const auto *input = reinterpret_cast<const float *>(input_ptr);
+            auto *output_headers = reinterpret_cast<openturbo::PackedTileHeader *>(output_headers_ptr);
+            auto stream = reinterpret_cast<cudaStream_t>(normalize_stream_handle(stream_handle));
+            throw_on_cuda_error(
+                openturbo::launch_encode_tile_fused_prerotated(input, output_headers, num_tiles, stream),
+                "launch_encode_tile_fused_prerotated");
+        },
+        py::arg("input_ptr"),
+        py::arg("output_headers_ptr"),
+        py::arg("num_tiles"),
         py::arg("stream_handle") = static_cast<std::uintptr_t>(0));
 
     module.def(

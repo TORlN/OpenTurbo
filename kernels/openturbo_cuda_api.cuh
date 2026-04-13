@@ -14,6 +14,12 @@ namespace openturbo
         float rope_theta,
         cudaStream_t stream = nullptr);
 
+    cudaError_t launch_encode_tile_fused_prerotated(
+        const float *input,
+        PackedTileHeader *output_headers,
+        int num_tiles,
+        cudaStream_t stream = nullptr);
+
     cudaError_t launch_scan_query_many_cache(
         const PackedTileHeader *query_header,
         const PackedTileHeader *cache_headers,

@@ -216,6 +216,33 @@ int main()
             break;
         }
 
+        if (!check_status(
+                "openturbo_encode_tile_fused_prerotated",
+                openturbo_encode_tile_fused_prerotated(device_input, device_headers, 1, nullptr, &cuda_status),
+                cuda_status))
+        {
+            break;
+        }
+
+        if (cudaMemcpy(&host_header, device_headers, sizeof(host_header), cudaMemcpyDeviceToHost) != cudaSuccess)
+        {
+            std::cerr << "cudaMemcpy device->host prerotated failed" << std::endl;
+            break;
+        }
+
+        if (host_header.reserved_u32 != 0u ||
+            (host_header.quadrant_word_0 == 0ull && host_header.quadrant_word_1 == 0ull))
+        {
+            std::cerr << "direct C API prerotated encode produced an invalid header" << std::endl;
+            break;
+        }
+
+        if (cudaMemset(device_headers, 0, sizeof(openturbo_packed_tile_header_t)) != cudaSuccess)
+        {
+            std::cerr << "cudaMemset failed" << std::endl;
+            break;
+        }
+
         const openturbo_ggml_tensor_view_t input_view = make_contiguous_2d_view(device_input, OPENTURBO_GGML_TYPE_F32, OPENTURBO_TILE_DIMS, 1);
         const openturbo_ggml_tensor_view_t output_view = make_contiguous_1d_view(device_headers, OPENTURBO_GGML_TYPE_PACKED_TILE_HEADER, 1);
         const openturbo_stream_context_t stream_context{nullptr, OPENTURBO_STREAM_CONTEXT_DEFAULT};
@@ -238,6 +265,33 @@ int main()
             (host_header.quadrant_word_0 == 0ull && host_header.quadrant_word_1 == 0ull))
         {
             std::cerr << "ggml adapter encode produced an invalid header" << std::endl;
+            break;
+        }
+
+        if (cudaMemset(device_headers, 0, sizeof(openturbo_packed_tile_header_t)) != cudaSuccess)
+        {
+            std::cerr << "cudaMemset failed" << std::endl;
+            break;
+        }
+
+        if (!check_status(
+                "openturbo_ggml_encode_prerotated",
+                openturbo_ggml_encode_prerotated(&input_view, &output_view, stream_context, &cuda_status),
+                cuda_status))
+        {
+            break;
+        }
+
+        if (cudaMemcpy(&host_header, device_headers, sizeof(host_header), cudaMemcpyDeviceToHost) != cudaSuccess)
+        {
+            std::cerr << "cudaMemcpy device->host after ggml prerotated encode failed" << std::endl;
+            break;
+        }
+
+        if (host_header.reserved_u32 != 0u ||
+            (host_header.quadrant_word_0 == 0ull && host_header.quadrant_word_1 == 0ull))
+        {
+            std::cerr << "ggml adapter prerotated encode produced an invalid header" << std::endl;
             break;
         }
 
@@ -660,11 +714,26 @@ int main()
             output_view,
             13,
             10000.0f,
+            0u,
             stream_context,
             OPENTURBO_LLAMA_LAYOUT_HEAD_LOCAL_KV_TILES_V1};
         if (!check_status(
                 "openturbo_llama_encode",
                 openturbo_llama_encode(&llama_encode_request, &cuda_status),
+                cuda_status))
+        {
+            cudaFree(device_multi_cache_headers);
+            cudaFree(device_multi_query_headers);
+            cudaFree(device_cache_headers);
+            cudaFree(device_query_header);
+            break;
+        }
+
+        openturbo_llama_encode_request_t prerotated_llama_encode_request = llama_encode_request;
+        prerotated_llama_encode_request.flags = OPENTURBO_LLAMA_ENCODE_FLAG_INPUT_PREROTATED;
+        if (!check_status(
+                "openturbo_llama_encode(prerotated)",
+                openturbo_llama_encode(&prerotated_llama_encode_request, &cuda_status),
                 cuda_status))
         {
             cudaFree(device_multi_cache_headers);

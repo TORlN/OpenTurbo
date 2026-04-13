@@ -28,9 +28,12 @@ extern "C"
         openturbo_ggml_tensor_view_t output_headers;
         int token_pos;
         float rope_theta;
+        uint32_t flags;
         openturbo_stream_context_t stream_context;
         uint32_t layout;
     } openturbo_llama_encode_request_t;
+
+#define OPENTURBO_LLAMA_ENCODE_FLAG_INPUT_PREROTATED (1u << 0)
 
     typedef struct openturbo_llama_scan_request_t
     {

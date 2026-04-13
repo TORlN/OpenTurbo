@@ -45,6 +45,13 @@ extern "C"
         openturbo_stream_context_t stream_context,
         int *cuda_status_out);
 
+    OPENTURBO_CAPI openturbo_status_t openturbo_llama_encode_from_kv_heads_prerotated(
+        const openturbo_ggml_tensor_view_t *input_heads,
+        const openturbo_ggml_tensor_view_t *output_headers_by_head,
+        int head_index,
+        openturbo_stream_context_t stream_context,
+        int *cuda_status_out);
+
     OPENTURBO_CAPI openturbo_status_t openturbo_llama_scan_from_kv_cache(
         const openturbo_ggml_tensor_view_t *query_headers_by_head,
         const openturbo_ggml_tensor_view_t *cache_headers_by_head,
@@ -60,6 +67,12 @@ extern "C"
         const openturbo_ggml_tensor_view_t *output_headers_by_head,
         int token_pos,
         float rope_theta,
+        openturbo_stream_context_t stream_context,
+        int *cuda_status_out);
+
+    OPENTURBO_CAPI openturbo_status_t openturbo_llama_encode_all_kv_heads_prerotated(
+        const openturbo_ggml_tensor_view_t *input_heads,
+        const openturbo_ggml_tensor_view_t *output_headers_by_head,
         openturbo_stream_context_t stream_context,
         int *cuda_status_out);
 

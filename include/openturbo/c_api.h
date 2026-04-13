@@ -55,6 +55,13 @@ extern "C"
         void *stream_handle,
         int *cuda_status_out);
 
+    OPENTURBO_CAPI openturbo_status_t openturbo_encode_tile_fused_prerotated(
+        const float *input,
+        openturbo_packed_tile_header_t *output_headers,
+        int num_tiles,
+        void *stream_handle,
+        int *cuda_status_out);
+
     OPENTURBO_CAPI openturbo_status_t openturbo_scan_query_many_cache(
         const openturbo_packed_tile_header_t *query_header,
         const openturbo_packed_tile_header_t *cache_headers,

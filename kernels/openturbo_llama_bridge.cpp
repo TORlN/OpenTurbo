@@ -10,6 +10,11 @@ namespace
     {
         return layout == OPENTURBO_LLAMA_LAYOUT_HEAD_LOCAL_KV_TILES_V1;
     }
+
+    bool is_prerotated_encode_request(const openturbo_llama_encode_request_t &request)
+    {
+        return (request.flags & OPENTURBO_LLAMA_ENCODE_FLAG_INPUT_PREROTATED) != 0;
+    }
 }
 
 extern "C" OPENTURBO_CAPI openturbo_status_t openturbo_llama_encode(
@@ -24,6 +29,15 @@ extern "C" OPENTURBO_CAPI openturbo_status_t openturbo_llama_encode(
     if (!has_supported_layout(request->layout))
     {
         return OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT;
+    }
+
+    if (is_prerotated_encode_request(*request))
+    {
+        return openturbo_ggml_encode_prerotated(
+            &request->input,
+            &request->output_headers,
+            request->stream_context,
+            cuda_status_out);
     }
 
     return openturbo_ggml_encode(

@@ -87,6 +87,45 @@ namespace openturbo::ggml_downstream
             cuda_status_out);
     }
 
+    inline openturbo_status_t llama_encode_from_ggml_tensors_prerotated(
+        const ggml_tensor *input_heads,
+        ggml_tensor *output_headers_by_head,
+        int head_index,
+        openturbo_stream_context_t stream_context,
+        int *cuda_status_out)
+    {
+        if (input_heads == nullptr || output_headers_by_head == nullptr)
+        {
+            return OPENTURBO_STATUS_INVALID_ARGUMENT;
+        }
+
+        if (input_heads->type != GGML_TYPE_F32)
+        {
+            return OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT;
+        }
+
+        openturbo_ggml_tensor_view_t input_view{};
+        openturbo_ggml_tensor_view_t output_view{};
+        const openturbo_status_t input_status = make_view(input_heads, OPENTURBO_GGML_TYPE_F32, &input_view);
+        if (input_status != OPENTURBO_STATUS_SUCCESS)
+        {
+            return input_status;
+        }
+
+        const openturbo_status_t output_status = make_view(output_headers_by_head, OPENTURBO_GGML_TYPE_PACKED_TILE_HEADER, &output_view);
+        if (output_status != OPENTURBO_STATUS_SUCCESS)
+        {
+            return output_status;
+        }
+
+        return openturbo_llama_encode_from_kv_heads_prerotated(
+            &input_view,
+            &output_view,
+            head_index,
+            stream_context,
+            cuda_status_out);
+    }
+
     inline openturbo_status_t llama_scan_from_ggml_tensors(
         const ggml_tensor *query_headers_by_head,
         const ggml_tensor *cache_headers_by_head,
@@ -176,6 +215,43 @@ namespace openturbo::ggml_downstream
             &output_view,
             token_pos,
             rope_theta,
+            stream_context,
+            cuda_status_out);
+    }
+
+    inline openturbo_status_t llama_encode_all_heads_from_ggml_tensors_prerotated(
+        const ggml_tensor *input_heads,
+        ggml_tensor *output_headers_by_head,
+        openturbo_stream_context_t stream_context,
+        int *cuda_status_out)
+    {
+        if (input_heads == nullptr || output_headers_by_head == nullptr)
+        {
+            return OPENTURBO_STATUS_INVALID_ARGUMENT;
+        }
+
+        if (input_heads->type != GGML_TYPE_F32)
+        {
+            return OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT;
+        }
+
+        openturbo_ggml_tensor_view_t input_view{};
+        openturbo_ggml_tensor_view_t output_view{};
+        const openturbo_status_t input_status = make_view(input_heads, OPENTURBO_GGML_TYPE_F32, &input_view);
+        if (input_status != OPENTURBO_STATUS_SUCCESS)
+        {
+            return input_status;
+        }
+
+        const openturbo_status_t output_status = make_view(output_headers_by_head, OPENTURBO_GGML_TYPE_PACKED_TILE_HEADER, &output_view);
+        if (output_status != OPENTURBO_STATUS_SUCCESS)
+        {
+            return output_status;
+        }
+
+        return openturbo_llama_encode_all_kv_heads_prerotated(
+            &input_view,
+            &output_view,
             stream_context,
             cuda_status_out);
     }

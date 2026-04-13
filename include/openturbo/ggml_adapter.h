@@ -83,6 +83,12 @@ extern "C"
         openturbo_stream_context_t stream_context,
         int *cuda_status_out);
 
+    OPENTURBO_CAPI openturbo_status_t openturbo_ggml_encode_prerotated(
+        const openturbo_ggml_tensor_view_t *input,
+        const openturbo_ggml_tensor_view_t *output_headers,
+        openturbo_stream_context_t stream_context,
+        int *cuda_status_out);
+
     OPENTURBO_CAPI openturbo_status_t openturbo_ggml_scan_query_many_cache(
         const openturbo_ggml_tensor_view_t *query_header,
         const openturbo_ggml_tensor_view_t *cache_headers,

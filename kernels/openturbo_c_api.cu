@@ -84,6 +84,26 @@ extern "C" OPENTURBO_CAPI openturbo_status_t openturbo_encode_tile_fused(
                               cuda_status_out);
 }
 
+extern "C" OPENTURBO_CAPI openturbo_status_t openturbo_encode_tile_fused_prerotated(
+    const float *input,
+    openturbo_packed_tile_header_t *output_headers,
+    int num_tiles,
+    void *stream_handle,
+    int *cuda_status_out)
+{
+    if (input == nullptr || output_headers == nullptr || num_tiles <= 0)
+    {
+        return OPENTURBO_STATUS_INVALID_ARGUMENT;
+    }
+
+    return export_cuda_status(openturbo::launch_encode_tile_fused_prerotated(
+                                  input,
+                                  as_cpp_headers(output_headers),
+                                  num_tiles,
+                                  normalize_stream_handle(stream_handle)),
+                              cuda_status_out);
+}
+
 extern "C" OPENTURBO_CAPI openturbo_status_t openturbo_scan_query_many_cache(
     const openturbo_packed_tile_header_t *query_header,
     const openturbo_packed_tile_header_t *cache_headers,

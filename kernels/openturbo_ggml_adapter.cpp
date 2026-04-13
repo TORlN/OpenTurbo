@@ -170,6 +170,37 @@ extern "C" OPENTURBO_CAPI openturbo_status_t openturbo_ggml_encode(
         cuda_status_out);
 }
 
+extern "C" OPENTURBO_CAPI openturbo_status_t openturbo_ggml_encode_prerotated(
+    const openturbo_ggml_tensor_view_t *input,
+    const openturbo_ggml_tensor_view_t *output_headers,
+    openturbo_stream_context_t stream_context,
+    int *cuda_status_out)
+{
+    if (input == nullptr || output_headers == nullptr)
+    {
+        return OPENTURBO_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (!is_encode_input_layout(*input))
+    {
+        return OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT;
+    }
+
+    const uint64_t input_elements = element_count(*input);
+    const uint64_t num_tiles = input_elements / OPENTURBO_TILE_DIMS;
+    if (!is_encode_output_layout(*output_headers, num_tiles))
+    {
+        return OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT;
+    }
+
+    return openturbo_encode_tile_fused_prerotated(
+        static_cast<const float *>(input->data),
+        static_cast<openturbo_packed_tile_header_t *>(output_headers->data),
+        static_cast<int>(num_tiles),
+        normalize_stream_context(stream_context),
+        cuda_status_out);
+}
+
 extern "C" OPENTURBO_CAPI openturbo_status_t openturbo_ggml_scan_query_many_cache(
     const openturbo_ggml_tensor_view_t *query_header,
     const openturbo_ggml_tensor_view_t *cache_headers,

@@ -202,6 +202,40 @@ extern "C" OPENTURBO_CAPI openturbo_status_t openturbo_llama_encode_from_kv_head
         output_head_view,
         token_pos,
         rope_theta,
+        0u,
+        stream_context,
+        OPENTURBO_LLAMA_LAYOUT_HEAD_LOCAL_KV_TILES_V1};
+    return openturbo_llama_encode(&request, cuda_status_out);
+}
+
+extern "C" OPENTURBO_CAPI openturbo_status_t openturbo_llama_encode_from_kv_heads_prerotated(
+    const openturbo_ggml_tensor_view_t *input_heads,
+    const openturbo_ggml_tensor_view_t *output_headers_by_head,
+    int head_index,
+    openturbo_stream_context_t stream_context,
+    int *cuda_status_out)
+{
+    if (input_heads == nullptr || output_headers_by_head == nullptr || !has_valid_head_index(head_index, input_heads->ne[2]))
+    {
+        return OPENTURBO_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (!is_encode_input_storage(*input_heads) ||
+        !is_encode_output_storage(*output_headers_by_head) ||
+        output_headers_by_head->ne[0] != input_heads->ne[1] ||
+        output_headers_by_head->ne[1] != input_heads->ne[2])
+    {
+        return OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT;
+    }
+
+    const openturbo_ggml_tensor_view_t input_head_view = make_encode_input_head_view(*input_heads, head_index);
+    const openturbo_ggml_tensor_view_t output_head_view = make_encode_output_head_view(*output_headers_by_head, head_index);
+    const openturbo_llama_encode_request_t request{
+        input_head_view,
+        output_head_view,
+        0,
+        0.0f,
+        OPENTURBO_LLAMA_ENCODE_FLAG_INPUT_PREROTATED,
         stream_context,
         OPENTURBO_LLAMA_LAYOUT_HEAD_LOCAL_KV_TILES_V1};
     return openturbo_llama_encode(&request, cuda_status_out);
@@ -279,6 +313,42 @@ extern "C" OPENTURBO_CAPI openturbo_status_t openturbo_llama_encode_all_kv_heads
             static_cast<int>(head_index),
             token_pos,
             rope_theta,
+            stream_context,
+            cuda_status_out);
+        if (status != OPENTURBO_STATUS_SUCCESS)
+        {
+            return status;
+        }
+    }
+
+    return OPENTURBO_STATUS_SUCCESS;
+}
+
+extern "C" OPENTURBO_CAPI openturbo_status_t openturbo_llama_encode_all_kv_heads_prerotated(
+    const openturbo_ggml_tensor_view_t *input_heads,
+    const openturbo_ggml_tensor_view_t *output_headers_by_head,
+    openturbo_stream_context_t stream_context,
+    int *cuda_status_out)
+{
+    if (input_heads == nullptr || output_headers_by_head == nullptr)
+    {
+        return OPENTURBO_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (!is_encode_input_storage(*input_heads) ||
+        !is_encode_output_storage(*output_headers_by_head) ||
+        output_headers_by_head->ne[0] != input_heads->ne[1] ||
+        output_headers_by_head->ne[1] != input_heads->ne[2])
+    {
+        return OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT;
+    }
+
+    for (int64_t head_index = 0; head_index < input_heads->ne[2]; ++head_index)
+    {
+        const openturbo_status_t status = openturbo_llama_encode_from_kv_heads_prerotated(
+            input_heads,
+            output_headers_by_head,
+            static_cast<int>(head_index),
             stream_context,
             cuda_status_out);
         if (status != OPENTURBO_STATUS_SUCCESS)

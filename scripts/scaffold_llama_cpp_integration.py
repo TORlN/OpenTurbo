@@ -20,6 +20,7 @@ struct openturbo_llama_cpp_encode_request {
     ggml_tensor * output_headers_by_head;
     int token_pos;
     float rope_theta;
+    bool input_is_prerotated;
     bool all_heads;
     int head_index;
     openturbo_stream_context_t stream_context;
@@ -76,6 +77,23 @@ openturbo_status_t openturbo_llama_cpp_encode(
     int * cuda_status_out) {
     if (request == nullptr || request->input_heads == nullptr || request->output_headers_by_head == nullptr) {
         return OPENTURBO_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (request->input_is_prerotated) {
+        if (request->all_heads) {
+            return openturbo::ggml_downstream::llama_encode_all_heads_from_ggml_tensors_prerotated(
+                request->input_heads,
+                request->output_headers_by_head,
+                request->stream_context,
+                cuda_status_out);
+        }
+
+        return openturbo::ggml_downstream::llama_encode_from_ggml_tensors_prerotated(
+            request->input_heads,
+            request->output_headers_by_head,
+            request->head_index,
+            request->stream_context,
+            cuda_status_out);
     }
 
     if (request->all_heads) {
