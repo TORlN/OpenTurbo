@@ -10,10 +10,6 @@
 #error "Include ggml.h before openturbo/ggml_downstream.hpp, or provide a compatible ggml_tensor definition"
 #endif
 
-#ifndef GGML_TYPE_F32
-#error "GGML_TYPE_F32 must be defined before including openturbo/ggml_downstream.hpp"
-#endif
-
 struct ggml_tensor;
 
 namespace openturbo::ggml_downstream

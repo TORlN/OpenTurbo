@@ -195,7 +195,7 @@ If you do not have llama.cpp yet, the easiest one-command bootstrap on Windows i
 scripts\bootstrap_llama_cpp_integration.bat
 ```
 
-That will clone llama.cpp into a local `llama` directory if needed and generate the OpenTurbo scaffold under `llama\examples\openturbo`.
+That will clone llama.cpp into a local `llama` directory if needed, generate the OpenTurbo scaffold under `llama\examples\openturbo`, and apply the experimental `cpy_k()` probe patch automatically.
 
 If you run the script with no arguments, it will create a local `llama` directory in the current working directory and write the scaffold there:
 
@@ -224,6 +224,14 @@ You can also use the Python script in explicit bootstrap mode:
 ```powershell
 .venv\Scripts\python.exe scripts\scaffold_llama_cpp_integration.py --bootstrap
 ```
+
+If you want the scaffold plus the automated downstream `cpy_k()` probe patch explicitly:
+
+```powershell
+.venv\Scripts\python.exe scripts\scaffold_llama_cpp_integration.py --bootstrap --probe-k-cache
+```
+
+That patch adds an `OPENTURBO_EXPERIMENTAL_K_CACHE_PROBE` CMake option to the downstream checkout and instruments `llama_kv_cache::cpy_k()` to emit a one-time tensor-layout log line during inference.
 
 The generated files are intentionally small and explicit. They wrap real `ggml_tensor` objects through `include/openturbo/ggml_downstream.hpp`, but you still need to connect them to the actual llama.cpp call site that owns the K/V cache tensors.
 

@@ -11,9 +11,9 @@ if not exist "%PYTHON%" (
 )
 
 if "%~1"=="" (
-    "%PYTHON%" "%WORKSPACE_DIR%\scripts\scaffold_llama_cpp_integration.py" --bootstrap --force
+    "%PYTHON%" "%WORKSPACE_DIR%\scripts\scaffold_llama_cpp_integration.py" --bootstrap --probe-k-cache --force
 ) else (
-    "%PYTHON%" "%WORKSPACE_DIR%\scripts\scaffold_llama_cpp_integration.py" --llama-root "%~1" --bootstrap --force
+    "%PYTHON%" "%WORKSPACE_DIR%\scripts\scaffold_llama_cpp_integration.py" --llama-root "%~1" --bootstrap --probe-k-cache --force
 )
 
 exit /b %errorlevel%
