@@ -7,8 +7,20 @@ extern "C"
 {
 #endif
 
-#define OPENTURBO_LLAMA_LAYOUT_KV_TILES_V1 0u
-#define OPENTURBO_LLAMA_LAYOUT_FLAT_TILES OPENTURBO_LLAMA_LAYOUT_KV_TILES_V1
+#define OPENTURBO_LLAMA_LAYOUT_HEAD_LOCAL_KV_TILES_V1 0u
+#define OPENTURBO_LLAMA_LAYOUT_KV_TILES_V1 OPENTURBO_LLAMA_LAYOUT_HEAD_LOCAL_KV_TILES_V1
+#define OPENTURBO_LLAMA_LAYOUT_FLAT_TILES OPENTURBO_LLAMA_LAYOUT_HEAD_LOCAL_KV_TILES_V1
+
+    /*
+     * The llama bridge accepts already-sliced head-local ggml-style views.
+     *
+     * V1 layout matches the adapter contract exactly:
+     * - encode input:  [128, num_head_tiles]
+     * - encode output: [num_head_tiles]
+     * - scan query:    [num_head_tiles] or [1] for the single-tile primitive
+     * - scan cache:    [num_head_tiles, num_cache_tokens] with tile-major token slices
+     * - scan output:   [num_cache_tokens]
+     */
 
     typedef struct openturbo_llama_encode_request_t
     {

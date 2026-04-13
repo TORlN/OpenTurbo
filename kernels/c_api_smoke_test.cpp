@@ -476,7 +476,7 @@ int main()
             13,
             10000.0f,
             stream_context,
-            OPENTURBO_LLAMA_LAYOUT_KV_TILES_V1};
+            OPENTURBO_LLAMA_LAYOUT_HEAD_LOCAL_KV_TILES_V1};
         if (!check_status(
                 "openturbo_llama_encode",
                 openturbo_llama_encode(&llama_encode_request, &cuda_status),
@@ -496,7 +496,7 @@ int main()
             1,
             static_cast<int>(single_tile_cache_headers.size()),
             stream_context,
-            OPENTURBO_LLAMA_LAYOUT_KV_TILES_V1};
+            OPENTURBO_LLAMA_LAYOUT_HEAD_LOCAL_KV_TILES_V1};
         if (!check_status(
                 "openturbo_llama_scan(single)",
                 openturbo_llama_scan(&llama_single_scan_request, &cuda_status),
@@ -516,7 +516,7 @@ int main()
             2,
             2,
             stream_context,
-            OPENTURBO_LLAMA_LAYOUT_KV_TILES_V1};
+            OPENTURBO_LLAMA_LAYOUT_HEAD_LOCAL_KV_TILES_V1};
         if (!check_status(
                 "openturbo_llama_scan(multi)",
                 openturbo_llama_scan(&llama_multi_scan_request, &cuda_status),
@@ -529,6 +529,18 @@ int main()
             break;
         }
 
+        openturbo_llama_encode_request_t invalid_llama_encode_request = llama_encode_request;
+        invalid_llama_encode_request.layout = 99u;
+        if (openturbo_llama_encode(&invalid_llama_encode_request, &cuda_status) != OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT)
+        {
+            cudaFree(device_multi_cache_headers);
+            cudaFree(device_multi_query_headers);
+            cudaFree(device_cache_headers);
+            cudaFree(device_query_header);
+            std::cerr << "llama bridge encode path did not reject unsupported layout id" << std::endl;
+            break;
+        }
+
         openturbo_llama_scan_request_t invalid_llama_request = llama_single_scan_request;
         invalid_llama_request.layout = 99u;
         if (openturbo_llama_scan(&invalid_llama_request, &cuda_status) != OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT)
@@ -537,7 +549,19 @@ int main()
             cudaFree(device_multi_query_headers);
             cudaFree(device_cache_headers);
             cudaFree(device_query_header);
-            std::cerr << "llama bridge did not reject unsupported layout id" << std::endl;
+            std::cerr << "llama bridge scan path did not reject unsupported layout id" << std::endl;
+            break;
+        }
+
+        openturbo_llama_scan_request_t invalid_llama_count_request = llama_multi_scan_request;
+        invalid_llama_count_request.num_cache_tokens = 3;
+        if (openturbo_llama_scan(&invalid_llama_count_request, &cuda_status) != OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT)
+        {
+            cudaFree(device_multi_cache_headers);
+            cudaFree(device_multi_query_headers);
+            cudaFree(device_cache_headers);
+            cudaFree(device_query_header);
+            std::cerr << "llama bridge did not reject mismatched cache token count" << std::endl;
             break;
         }
 

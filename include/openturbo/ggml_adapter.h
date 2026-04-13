@@ -23,6 +23,7 @@ extern "C"
 
 #define OPENTURBO_GGML_DIM_TILE_VALUES 0
 #define OPENTURBO_GGML_DIM_TILE_INDEX 1
+#define OPENTURBO_GGML_DIM_HEAD_TILE OPENTURBO_GGML_DIM_TILE_INDEX
 #define OPENTURBO_GGML_DIM_CACHE_TOKEN 1
 
 #define OPENTURBO_STREAM_CONTEXT_DEFAULT 0u
@@ -44,21 +45,34 @@ extern "C"
     } openturbo_ggml_tensor_view_t;
 
     /*
+     * Head-local KV layout contract used by downstream llama.cpp / ggml shims:
+     *
      * Encode contract:
-     * - input:  rank 2, type F32, shape [128, num_tiles]
-     * - output: rank 1, type PACKED_TILE_HEADER, shape [num_tiles]
+     * - input:  rank 2, type F32, shape [128, num_head_tiles]
+     * - output: rank 1, type PACKED_TILE_HEADER, shape [num_head_tiles]
+     * - semantic: one token worth of already-sliced head-local values, presented as
+     *   consecutive 128-d tiles for a single K or V stream.
      *
      * Single-tile scan contract:
      * - query:  rank 1, type PACKED_TILE_HEADER, shape [1]
      * - cache:  rank 1, type PACKED_TILE_HEADER, shape [num_cache_tokens]
      * - output: rank 1, type F32, shape [num_cache_tokens]
+     * - semantic: one query tile scored against one cached tile per token.
      *
      * Multi-tile scan contract:
-     * - query:  rank 1, type PACKED_TILE_HEADER, shape [num_query_tiles]
-     * - cache:  rank 2, type PACKED_TILE_HEADER, shape [num_query_tiles, num_cache_tokens]
+     * - query:  rank 1, type PACKED_TILE_HEADER, shape [num_head_tiles]
+     * - cache:  rank 2, type PACKED_TILE_HEADER, shape [num_head_tiles, num_cache_tokens]
      * - output: rank 1, type F32, shape [num_cache_tokens]
+     * - semantic: one head-local query vector scored against all cached tokens.
      *
-     * All tensors must be contiguous in the declared layout.
+     * Cache layout order is tile-major inside each token:
+     * - dim 0 = head-local tile index
+     * - dim 1 = cache token index
+     * - contiguous stride rules therefore require nb[0] = sizeof(element) and
+     *   nb[1] = num_head_tiles * sizeof(element)
+     *
+     * Downstream integrations are expected to slice real ggml / llama.cpp tensors into
+     * these contiguous head-local views before calling the adapter.
      */
 
     OPENTURBO_CAPI openturbo_status_t openturbo_ggml_encode(

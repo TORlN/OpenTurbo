@@ -2,7 +2,7 @@
 
 OpenTurbo is an experimental CUDA prototype for a TurboQuant-style 3-bit KV-cache compression pipeline with a QJL-style residual sign correction path.
 
-The current repository is focused on kernel structure, packing layout, correctness checks, and early integration surfaces. It is not yet a full llama.cpp or ggml integration.
+The current repository is focused on kernel structure, packing layout, correctness checks, and a concrete downstream-facing head-local integration contract. It is not yet a full llama.cpp or ggml integration.
 
 ## Current State
 
@@ -12,7 +12,7 @@ What exists today:
 * A scan kernel that estimates query-cache dot products from packed headers, including the residual correction term.
 * CPU reference paths and smoke tests for the encoder and scan logic.
 * A Python extension build path using CMake and scikit-build-core.
-* A versioned native C ABI and an early ggml-style adapter layer intended for future llama.cpp and ggml integration.
+* A versioned native C ABI, a concrete head-local ggml-style adapter contract, and a llama-facing request bridge intended for future downstream integration.
 
 What does not exist yet:
 
@@ -47,6 +47,13 @@ $$
 \langle q, k \rangle \approx \langle \hat{q}, \hat{k} \rangle + \alpha_k \cdot (s_q \cdot s_k)
 $$
 
+The downstream tensor contract is now frozen at a head-local slice boundary:
+
+* Encode consumes one token's head-local values as a contiguous rank-2 view with shape `[128, num_head_tiles]`.
+* Multi-tile scan consumes a contiguous cache view with shape `[num_head_tiles, num_cache_tokens]`.
+* Cache layout is tile-major within each token, so all packed tiles for one token remain contiguous in memory.
+* Downstream llama.cpp or ggml code is expected to slice real cache tensors into these views before calling OpenTurbo.
+
 ## Repository Layout
 
 ```text
@@ -68,10 +75,10 @@ Important files:
 * `kernels/encoder.cu`: fused encoder kernel.
 * `kernels/scan.cu`: packed-header scan kernel.
 * `kernels/openturbo_c_api.cu`: exported C ABI implementation.
-* `kernels/openturbo_ggml_adapter.cpp`: explicit prototype KV-tile adapter and validator.
+* `kernels/openturbo_ggml_adapter.cpp`: head-local KV adapter and ranked-layout validator.
 * `include/openturbo/c_api.h`: versioned public C ABI.
-* `include/openturbo/ggml_adapter.h`: explicit prototype KV-tile tensor contract for future ggml integration.
-* `include/openturbo/llama_bridge.h`: dependency-free request layer intended for a downstream llama.cpp shim.
+* `include/openturbo/ggml_adapter.h`: concrete head-local KV tensor contract for downstream ggml slicing code.
+* `include/openturbo/llama_bridge.h`: dependency-free request layer matching the head-local downstream contract.
 * `src/openturbo/cuda_api.py`: raw pointer-based Python wrapper API.
 * `src/openturbo/tensor_api.py`: tensor-like Python wrapper layer.
 
@@ -137,8 +144,8 @@ The native side currently exposes:
 * `openturbo_cuda_core`: shared kernel implementation target used by both native surfaces.
 * `openturbo_c_api`: shared library exposing a stable C ABI.
 * `include/openturbo/c_api.h`: public ABI with explicit version and status codes.
-* `include/openturbo/ggml_adapter.h`: explicit ranked prototype KV-tile adapter API.
-* `include/openturbo/llama_bridge.h`: a thin request-oriented bridge layer that downstream llama.cpp code can call without including pybind11 or directly depending on the lower-level adapter entry points.
+* `include/openturbo/ggml_adapter.h`: explicit ranked head-local adapter API.
+* `include/openturbo/llama_bridge.h`: a thin request-oriented bridge layer that downstream llama.cpp code can call after slicing real cache tensors into the head-local OpenTurbo views.
 
 The C ABI intentionally separates OpenTurbo status from raw CUDA status:
 
@@ -153,7 +160,7 @@ Local validation currently includes:
 * Encoder smoke test executable.
 * Scan smoke test executable.
 * Native C ABI smoke test executable covering encode plus both scan entry points.
-* Native failure-path checks for malformed ggml-style KV layouts and llama-bridge requests.
+* Native failure-path checks for malformed head-local KV layouts, unsupported llama bridge layouts, and mismatched request counts.
 * Python unit and smoke tests.
 
 GitHub Actions currently does the following:
@@ -169,7 +176,7 @@ This repo should currently be treated as a kernel and integration prototype.
 
 Known limitations:
 
-* The ggml-facing adapter validates a prototype KV-tile layout, not real llama.cpp or ggml runtime tensor layouts.
+* The ggml-facing adapter still does not ingest raw ggml runtime tensors directly; downstream code must slice them into the head-local OpenTurbo views.
 * The project is currently Windows-first for CUDA development.
 * The Python tensor layer uses duck typing and does not enforce a specific framework.
 * The packed-header format and ABI are still young enough that downstream integrations should treat them as evolving.
@@ -178,6 +185,6 @@ Known limitations:
 
 Likely next engineering steps are:
 
-1. Replace the prototype KV-tile adapter contract with real llama.cpp and ggml cache tensor shapes, ranks, and stride semantics.
-2. Replace the dependency-free llama bridge request layer with a real llama.cpp-side shim in the downstream integration tree.
-3. Add model-level validation and profiler-driven performance work once the downstream integration path exists.
+1. Add a real llama.cpp-side shim that slices native ggml KV tensors into the frozen head-local OpenTurbo contract.
+2. Extend the bridge path from single head-local slices to full multi-head and sequence-aware integration flows.
+3. Add model-level validation and profiler-driven performance work once the downstream shim exists.

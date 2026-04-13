@@ -8,7 +8,7 @@ namespace
 {
     bool has_supported_layout(uint32_t layout)
     {
-        return layout == OPENTURBO_LLAMA_LAYOUT_FLAT_TILES;
+        return layout == OPENTURBO_LLAMA_LAYOUT_HEAD_LOCAL_KV_TILES_V1;
     }
 }
 
