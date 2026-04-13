@@ -7,10 +7,29 @@
 #include <cuda_runtime.h>
 
 #include <array>
+#include <cstddef>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+
+#define GGML_MAX_DIMS 4
+#define GGML_TYPE_F32 0
+
+enum ggml_type
+{
+    GGML_TYPE_I8 = 1
+};
+
+struct ggml_tensor
+{
+    void *data;
+    int type;
+    int64_t ne[GGML_MAX_DIMS];
+    size_t nb[GGML_MAX_DIMS];
+};
+
+#include "../include/openturbo/ggml_downstream.hpp"
 
 namespace
 {
@@ -67,6 +86,38 @@ namespace
         view.nb[1] = view.nb[0] * static_cast<uint64_t>(dim0);
         view.nb[2] = view.nb[1] * static_cast<uint64_t>(dim1);
         return view;
+    }
+
+    ggml_tensor make_mock_ggml_tensor_2d(void *data, int type, int64_t dim0, int64_t dim1, size_t element_stride)
+    {
+        ggml_tensor tensor{};
+        tensor.data = data;
+        tensor.type = type;
+        tensor.ne[0] = dim0;
+        tensor.ne[1] = dim1;
+        tensor.ne[2] = 1;
+        tensor.ne[3] = 1;
+        tensor.nb[0] = element_stride;
+        tensor.nb[1] = tensor.nb[0] * static_cast<size_t>(dim0);
+        tensor.nb[2] = tensor.nb[1] * static_cast<size_t>(dim1);
+        tensor.nb[3] = tensor.nb[2];
+        return tensor;
+    }
+
+    ggml_tensor make_mock_ggml_tensor_3d(void *data, int type, int64_t dim0, int64_t dim1, int64_t dim2, size_t element_stride)
+    {
+        ggml_tensor tensor{};
+        tensor.data = data;
+        tensor.type = type;
+        tensor.ne[0] = dim0;
+        tensor.ne[1] = dim1;
+        tensor.ne[2] = dim2;
+        tensor.ne[3] = 1;
+        tensor.nb[0] = element_stride;
+        tensor.nb[1] = tensor.nb[0] * static_cast<size_t>(dim0);
+        tensor.nb[2] = tensor.nb[1] * static_cast<size_t>(dim1);
+        tensor.nb[3] = tensor.nb[2] * static_cast<size_t>(dim2);
+        return tensor;
     }
 
     openturbo_packed_tile_header_t to_c_header(const openturbo::PackedTileHeader &header)
@@ -245,6 +296,28 @@ int main()
             cudaFree(device_headers_by_head);
             cudaFree(device_input_by_head);
             std::cerr << "llama KV shim encode did not reject invalid head index" << std::endl;
+            break;
+        }
+
+        ggml_tensor ggml_input_heads = make_mock_ggml_tensor_3d(device_input_by_head, GGML_TYPE_F32, OPENTURBO_TILE_DIMS, 1, 2, sizeof(float));
+        ggml_tensor ggml_output_heads = make_mock_ggml_tensor_2d(device_headers_by_head, GGML_TYPE_I8, 1, 2, OPENTURBO_PACKED_TILE_HEADER_BYTES);
+        if (!check_status(
+                "openturbo::ggml_downstream::llama_encode_from_ggml_tensors",
+                openturbo::ggml_downstream::llama_encode_from_ggml_tensors(&ggml_input_heads, &ggml_output_heads, 0, 13, 10000.0f, stream_context, &cuda_status),
+                cuda_status))
+        {
+            cudaFree(device_headers_by_head);
+            cudaFree(device_input_by_head);
+            break;
+        }
+
+        ggml_tensor invalid_ggml_input_heads = ggml_input_heads;
+        invalid_ggml_input_heads.type = GGML_TYPE_I8;
+        if (openturbo::ggml_downstream::llama_encode_from_ggml_tensors(&invalid_ggml_input_heads, &ggml_output_heads, 0, 13, 10000.0f, stream_context, &cuda_status) != OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT)
+        {
+            cudaFree(device_headers_by_head);
+            cudaFree(device_input_by_head);
+            std::cerr << "ggml downstream encode did not reject non-f32 input" << std::endl;
             break;
         }
         cudaFree(device_headers_by_head);
@@ -752,6 +825,39 @@ int main()
             cudaFree(device_cache_headers);
             cudaFree(device_query_header);
             std::cerr << "llama KV shim scan did not reject invalid head index" << std::endl;
+            break;
+        }
+
+        ggml_tensor ggml_query_heads = make_mock_ggml_tensor_2d(device_multi_query_headers_by_head, GGML_TYPE_I8, 2, 2, OPENTURBO_PACKED_TILE_HEADER_BYTES);
+        ggml_tensor ggml_cache_heads = make_mock_ggml_tensor_3d(device_multi_cache_headers_by_head, GGML_TYPE_I8, 2, 2, 2, OPENTURBO_PACKED_TILE_HEADER_BYTES);
+        ggml_tensor ggml_scan_output_heads = make_mock_ggml_tensor_2d(device_multi_head_scan_output, GGML_TYPE_F32, 2, 2, sizeof(float));
+        if (!check_status(
+                "openturbo::ggml_downstream::llama_scan_from_ggml_tensors",
+                openturbo::ggml_downstream::llama_scan_from_ggml_tensors(&ggml_query_heads, &ggml_cache_heads, &ggml_scan_output_heads, 0, 2, 2, stream_context, &cuda_status),
+                cuda_status))
+        {
+            cudaFree(device_multi_head_scan_output);
+            cudaFree(device_multi_cache_headers_by_head);
+            cudaFree(device_multi_query_headers_by_head);
+            cudaFree(device_multi_cache_headers);
+            cudaFree(device_multi_query_headers);
+            cudaFree(device_cache_headers);
+            cudaFree(device_query_header);
+            break;
+        }
+
+        ggml_tensor invalid_ggml_output_heads = ggml_scan_output_heads;
+        invalid_ggml_output_heads.type = GGML_TYPE_I8;
+        if (openturbo::ggml_downstream::llama_scan_from_ggml_tensors(&ggml_query_heads, &ggml_cache_heads, &invalid_ggml_output_heads, 0, 2, 2, stream_context, &cuda_status) != OPENTURBO_STATUS_INCOMPATIBLE_LAYOUT)
+        {
+            cudaFree(device_multi_head_scan_output);
+            cudaFree(device_multi_cache_headers_by_head);
+            cudaFree(device_multi_query_headers_by_head);
+            cudaFree(device_multi_cache_headers);
+            cudaFree(device_multi_query_headers);
+            cudaFree(device_cache_headers);
+            cudaFree(device_query_header);
+            std::cerr << "ggml downstream scan did not reject non-f32 output" << std::endl;
             break;
         }
 

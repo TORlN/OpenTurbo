@@ -148,6 +148,7 @@ The native side currently exposes:
 * `include/openturbo/ggml_adapter.h`: explicit ranked head-local adapter API.
 * `include/openturbo/llama_bridge.h`: a thin request-oriented bridge layer that downstream llama.cpp code can call after slicing real cache tensors into the head-local OpenTurbo views.
 * `include/openturbo/llama_kv_shim.h`: a downstream-oriented helper layer that slices dense `[... , num_heads]` KV storage into per-head bridge requests.
+* `include/openturbo/ggml_downstream.hpp`: a header-only bridge that accepts real `ggml_tensor` objects once `ggml.h` is included downstream.
 
 The C ABI intentionally separates OpenTurbo status from raw CUDA status:
 
@@ -161,7 +162,7 @@ Local validation currently includes:
 
 * Encoder smoke test executable.
 * Scan smoke test executable.
-* Native C ABI smoke test executable covering encode, bridge calls, and dense multi-head KV shim calls.
+* Native C ABI smoke test executable covering encode, bridge calls, dense multi-head KV shim calls, and a mock `ggml_tensor` downstream binding path.
 * Native failure-path checks for malformed head-local KV layouts, invalid shim head indices, unsupported llama bridge layouts, and mismatched request counts.
 * Python unit and smoke tests.
 
@@ -178,7 +179,7 @@ This repo should currently be treated as a kernel and integration prototype.
 
 Known limitations:
 
-* The ggml-facing adapter still does not ingest raw ggml runtime tensors directly; downstream code must provide either head-local views or dense tensors matching the shim contract.
+* The repo still does not build against ggml directly; the `ggml_tensor` bridge is header-only and is meant to be compiled inside a downstream llama.cpp or ggml tree.
 * The project is currently Windows-first for CUDA development.
 * The Python tensor layer uses duck typing and does not enforce a specific framework.
 * The packed-header format and ABI are still young enough that downstream integrations should treat them as evolving.
@@ -187,6 +188,6 @@ Known limitations:
 
 Likely next engineering steps are:
 
-1. Bind the dense KV shim to actual ggml tensor objects in a downstream llama.cpp integration tree.
+1. Wire `include/openturbo/ggml_downstream.hpp` into an actual llama.cpp integration point that owns real `ggml_tensor` KV caches.
 2. Extend the shim beyond single-head dispatch to batch multi-head and sequence-aware integration flows.
-3. Add model-level validation and profiler-driven performance work once the downstream shim is exercised in a real model path.
+3. Add model-level validation and profiler-driven performance work once the downstream bridge is exercised in a real model path.

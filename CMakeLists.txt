@@ -89,5 +89,5 @@ if(OPENTURBO_BUILD_CUDA)
         ARCHIVE DESTINATION openturbo
     )
 
-    install(FILES include/openturbo/c_api.h include/openturbo/ggml_adapter.h include/openturbo/llama_bridge.h include/openturbo/llama_kv_shim.h DESTINATION include/openturbo)
+    install(FILES include/openturbo/c_api.h include/openturbo/ggml_adapter.h include/openturbo/llama_bridge.h include/openturbo/llama_kv_shim.h include/openturbo/ggml_downstream.hpp DESTINATION include/openturbo)
 endif()
