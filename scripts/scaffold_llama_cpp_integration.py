@@ -149,6 +149,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate an OpenTurbo integration scaffold inside a llama.cpp checkout.")
     parser.add_argument("llama_root", nargs="?", type=Path, help="Optional path to an existing llama.cpp checkout or a destination to clone into.")
     parser.add_argument("--llama-root", dest="llama_root_override", type=Path, help="Explicit llama.cpp checkout path. Overrides the positional llama_root argument when both are provided.")
+    parser.add_argument("--bootstrap", action="store_true", help="Bootstrap a local llama.cpp checkout if missing, then generate the scaffold.")
     parser.add_argument("--clone-if-missing", action="store_true", help="Clone llama.cpp into llama_root if the directory does not exist.")
     parser.add_argument("--clone-url", default=DEFAULT_LLAMA_CPP_URL, help="Repository URL used with --clone-if-missing.")
     parser.add_argument("--output-dir", type=Path, help="Explicit directory where scaffold files will be written. Overrides --output-subdir when provided.")
@@ -184,6 +185,9 @@ def resolve_output_root(args: argparse.Namespace, llama_root: Path | None) -> Pa
 
 def main() -> int:
     args = build_arg_parser().parse_args()
+    if args.bootstrap:
+        args.clone_if_missing = True
+
     llama_root = resolve_llama_root(args)
     if args.clone_if_missing and llama_root is None:
         raise ValueError("--clone-if-missing requires a llama_root path or --llama-root.")

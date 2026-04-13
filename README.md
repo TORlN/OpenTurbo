@@ -189,6 +189,14 @@ Known limitations:
 
 If you do not want to wire the downstream bridge by hand, OpenTurbo can generate a drop-in scaffold into an existing llama.cpp checkout or a fresh destination directory:
 
+If you do not have llama.cpp yet, the easiest one-command bootstrap on Windows is:
+
+```powershell
+scripts\bootstrap_llama_cpp_integration.bat
+```
+
+That will clone llama.cpp into a local `llama` directory if needed and generate the OpenTurbo scaffold under `llama\examples\openturbo`.
+
 If you run the script with no arguments, it will create a local `llama` directory in the current working directory and write the scaffold there:
 
 ```powershell
@@ -209,6 +217,12 @@ To clone llama.cpp and generate the scaffold in one step:
 
 ```powershell
 .venv\Scripts\python.exe scripts\scaffold_llama_cpp_integration.py C:\path\to\llama.cpp --clone-if-missing
+```
+
+You can also use the Python script in explicit bootstrap mode:
+
+```powershell
+.venv\Scripts\python.exe scripts\scaffold_llama_cpp_integration.py --bootstrap
 ```
 
 The generated files are intentionally small and explicit. They wrap real `ggml_tensor` objects through `include/openturbo/ggml_downstream.hpp`, but you still need to connect them to the actual llama.cpp call site that owns the K/V cache tensors.
