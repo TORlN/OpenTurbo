@@ -1,5 +1,6 @@
 #include "fwht.cuh"
 #include "encoder_layout.cuh"
+#include "openturbo_cuda_api.cuh"
 
 #include <cuda_runtime.h>
 
@@ -7,6 +8,9 @@
 
 namespace openturbo
 {
+    constexpr int kWarpsPerBlock = 4;
+    constexpr int kThreadsPerBlock = 32 * kWarpsPerBlock;
+
     struct LaneValues
     {
         float r0;
@@ -221,6 +225,29 @@ namespace openturbo
                 reinterpret_cast<uint64_t *>(&output_headers[tile_id]);
             header_words[lane_id] = packed_word;
         }
+    }
+
+    cudaError_t launch_encode_tile_fused(
+        const float *input,
+        PackedTileHeader *output_headers,
+        int num_tiles,
+        int token_pos,
+        float rope_theta,
+        cudaStream_t stream)
+    {
+        if (num_tiles <= 0)
+        {
+            return cudaSuccess;
+        }
+
+        const int blocks = (num_tiles + kWarpsPerBlock - 1) / kWarpsPerBlock;
+        encode_tile_fused_kernel<<<blocks, kThreadsPerBlock, 0, stream>>>(
+            input,
+            output_headers,
+            num_tiles,
+            token_pos,
+            rope_theta);
+        return cudaGetLastError();
     }
 
 } // namespace openturbo

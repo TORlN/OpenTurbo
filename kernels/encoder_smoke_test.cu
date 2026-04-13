@@ -1,4 +1,5 @@
 #include "encoder_layout.cuh"
+#include "openturbo_cuda_api.cuh"
 #include "encoder_reference.hpp"
 #include "scan_reference.hpp"
 
@@ -8,19 +9,8 @@
 #include <cstdio>
 #include <cstdlib>
 
-namespace openturbo
-{
-    __global__ void encode_tile_fused_kernel(
-        const float *__restrict__ input,
-        PackedTileHeader *__restrict__ output_headers,
-        int num_tiles,
-        int token_pos,
-        float rope_theta);
-}
-
 namespace
 {
-    constexpr int kThreadsPerBlock = 32;
     constexpr float kFp16Tolerance = 0.5f;
     using FillTileFn = void (*)(float *, int);
 
@@ -189,14 +179,14 @@ namespace
             cudaMemset(device_header, 0, sizeof(openturbo::PackedTileHeader)),
             "cudaMemset(device_header)");
 
-        openturbo::encode_tile_fused_kernel<<<1, kThreadsPerBlock>>>(
-            device_input,
-            device_header,
-            1,
-            token_pos,
-            rope_theta);
-
-        check_cuda(cudaGetLastError(), "encode_tile_fused_kernel launch");
+        check_cuda(
+            openturbo::launch_encode_tile_fused(
+                device_input,
+                device_header,
+                1,
+                token_pos,
+                rope_theta),
+            "launch_encode_tile_fused");
         check_cuda(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
 
         check_cuda(
