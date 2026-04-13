@@ -205,6 +205,23 @@ def resolve_runner(build_dir: Path, config: str, target: str) -> Path:
     return build_dir / "bin" / config / exe_name
 
 
+def parse_probe_output(output: str, returncode: int) -> tuple[str, str]:
+    probe_match = PROBE_PATTERN.search(output)
+    shadow_match = SHADOW_PATTERN.search(output)
+    if probe_match is None:
+        raise RuntimeError(
+            "Probe run completed without an OpenTurbo cpy_k probe line. "
+            f"Exit code was {returncode}."
+        )
+    if shadow_match is None:
+        raise RuntimeError(
+            "Probe run completed without an OpenTurbo shadow_encode line. "
+            f"Exit code was {returncode}."
+        )
+
+    return probe_match.group(0), shadow_match.group(0)
+
+
 def run_probe(runner: Path, model_path: Path, prompt: str, seed: str, ngl: str) -> tuple[str, str]:
     command = [str(runner)]
     command.extend(["-m", str(model_path)])
@@ -226,20 +243,7 @@ def run_probe(runner: Path, model_path: Path, prompt: str, seed: str, ngl: str) 
     )
 
     output = (completed.stdout or "") + (completed.stderr or "")
-    probe_match = PROBE_PATTERN.search(output)
-    shadow_match = SHADOW_PATTERN.search(output)
-    if probe_match is None:
-        raise RuntimeError(
-            "Probe run completed without an OpenTurbo cpy_k probe line. "
-            f"Exit code was {completed.returncode}."
-        )
-    if shadow_match is None:
-        raise RuntimeError(
-            "Probe run completed without an OpenTurbo shadow_encode line. "
-            f"Exit code was {completed.returncode}."
-        )
-
-    return probe_match.group(0), shadow_match.group(0)
+    return parse_probe_output(output, completed.returncode)
 
 
 def main() -> int:

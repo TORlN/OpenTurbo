@@ -241,11 +241,23 @@ SHADOW_CALLBACK_CPP = """#include \"openturbo_shadow_eval_callback.hpp\"
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cstdio>
+#include <cstdint>
 #include <cstring>
+#include <unordered_map>
 #include <vector>
 
 namespace {
+struct openturbo_shadow_layer_sidecar {
+    int64_t row_capacity = 0;
+    int64_t tiles_per_row = 0;
+    std::vector<openturbo_packed_tile_header_t> headers;
+    std::vector<uint8_t> present_rows;
+};
+
+std::unordered_map<int, openturbo_shadow_layer_sidecar> g_openturbo_shadow_sidecars;
+
 bool openturbo_is_shadow_candidate(const ggml_tensor * tensor) {
     if (tensor == nullptr || tensor->op != GGML_OP_SET_ROWS) {
         return false;
@@ -279,6 +291,44 @@ bool openturbo_copy_tensor_bytes(const ggml_tensor * tensor, std::vector<unsigne
 
     ggml_backend_tensor_get(tensor, bytes.data(), 0, nbytes);
     return true;
+}
+
+bool openturbo_copy_row_indices(const ggml_tensor * tensor, std::vector<int64_t> & row_indices) {
+    if (tensor == nullptr) {
+        return false;
+    }
+
+    const int64_t count = ggml_nelements(tensor);
+    if (count <= 0) {
+        row_indices.clear();
+        return true;
+    }
+
+    row_indices.resize(static_cast<size_t>(count));
+    if (tensor->type == GGML_TYPE_I32) {
+        std::vector<int32_t> raw(static_cast<size_t>(count));
+        if (tensor->buffer != nullptr && ggml_backend_buffer_is_host(tensor->buffer)) {
+            std::memcpy(raw.data(), tensor->data, sizeof(int32_t) * raw.size());
+        } else {
+            ggml_backend_tensor_get(tensor, raw.data(), 0, sizeof(int32_t) * raw.size());
+        }
+
+        for (size_t index = 0; index < raw.size(); ++index) {
+            row_indices[index] = raw[index];
+        }
+        return true;
+    }
+
+    if (tensor->type == GGML_TYPE_I64) {
+        if (tensor->buffer != nullptr && ggml_backend_buffer_is_host(tensor->buffer)) {
+            std::memcpy(row_indices.data(), tensor->data, sizeof(int64_t) * row_indices.size());
+        } else {
+            ggml_backend_tensor_get(tensor, row_indices.data(), 0, sizeof(int64_t) * row_indices.size());
+        }
+        return true;
+    }
+
+    return false;
 }
 
 long long openturbo_first_row_index(const ggml_tensor * tensor) {
@@ -323,6 +373,51 @@ int openturbo_parse_layer_index(const ggml_tensor * tensor) {
     std::sscanf(cache_name, \"cache_k_l%d\", &layer_index);
     return layer_index;
 }
+
+int64_t openturbo_row_capacity(const ggml_tensor * tensor) {
+    if (tensor == nullptr) {
+        return 0;
+    }
+
+    return tensor->ne[1] * tensor->ne[2] * tensor->ne[3];
+}
+
+openturbo_shadow_layer_sidecar & openturbo_get_or_reset_sidecar(int layer_index, int64_t row_capacity, int64_t tiles_per_row) {
+    auto & sidecar = g_openturbo_shadow_sidecars[layer_index];
+    if (sidecar.row_capacity != row_capacity || sidecar.tiles_per_row != tiles_per_row) {
+        sidecar.row_capacity = row_capacity;
+        sidecar.tiles_per_row = tiles_per_row;
+        sidecar.headers.assign(static_cast<size_t>(row_capacity * tiles_per_row), {});
+        sidecar.present_rows.assign(static_cast<size_t>(row_capacity), 0);
+    }
+
+    return sidecar;
+}
+
+int openturbo_store_sidecar_rows(openturbo_shadow_layer_sidecar & sidecar,
+                                 const std::vector<int64_t> & row_indices,
+                                 const std::vector<openturbo_packed_tile_header_t> & encoded_headers) {
+    if (sidecar.tiles_per_row <= 0) {
+        return 0;
+    }
+
+    int stored_rows = 0;
+    const size_t tiles_per_row = static_cast<size_t>(sidecar.tiles_per_row);
+    for (size_t row = 0; row < row_indices.size(); ++row) {
+        const int64_t row_index = row_indices[row];
+        if (row_index < 0 || row_index >= sidecar.row_capacity) {
+            continue;
+        }
+
+        const size_t src_offset = row * tiles_per_row;
+        const size_t dst_offset = static_cast<size_t>(row_index) * tiles_per_row;
+        std::copy_n(encoded_headers.data() + src_offset, tiles_per_row, sidecar.headers.data() + dst_offset);
+        sidecar.present_rows[static_cast<size_t>(row_index)] = 1;
+        ++stored_rows;
+    }
+
+    return stored_rows;
+}
 }
 
 bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user_data) {
@@ -344,6 +439,7 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
     const ggml_tensor * src_values = tensor->src[0];
     const ggml_tensor * src_indices = tensor->src[1];
     const ggml_tensor * dst_cache = tensor->src[2];
+    const int layer_index = openturbo_parse_layer_index(dst_cache);
 
     const int64_t total_elements = ggml_nelements(src_values);
     const int num_tiles = static_cast<int>(total_elements / OPENTURBO_TILE_DIMS);
@@ -357,7 +453,7 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
         if (state == nullptr || !state->logged_error) {
             std::fprintf(stderr,
                          \"[openturbo] shadow_encode layer=%d status=skipped reason=no_cuda_device cuda=%d\\n\",
-                         openturbo_parse_layer_index(dst_cache),
+                         layer_index,
                          static_cast<int>(cuda_status));
             if (state != nullptr) {
                 state->logged_error = true;
@@ -368,6 +464,35 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
 
     std::vector<unsigned char> host_input_bytes;
     openturbo_copy_tensor_bytes(src_values, host_input_bytes);
+    std::vector<int64_t> row_indices;
+    if (!openturbo_copy_row_indices(src_indices, row_indices)) {
+        std::fprintf(stderr,
+                     \"[openturbo] shadow_encode layer=%d status=failed reason=unsupported_row_index_type\\n\",
+                     layer_index);
+        if (state != nullptr) {
+            state->logged_error = true;
+        }
+        return true;
+    }
+
+    if (row_indices.empty()) {
+        return true;
+    }
+
+    if (num_tiles % static_cast<int>(row_indices.size()) != 0) {
+        std::fprintf(stderr,
+                     \"[openturbo] shadow_encode layer=%d status=failed reason=non_integral_tiles_per_row num_tiles=%d rows=%zu\\n\",
+                     layer_index,
+                     num_tiles,
+                     row_indices.size());
+        if (state != nullptr) {
+            state->logged_error = true;
+        }
+        return true;
+    }
+
+    const int64_t row_capacity = openturbo_row_capacity(dst_cache);
+    const int64_t tiles_per_row = num_tiles / static_cast<int64_t>(row_indices.size());
 
     float * device_input = nullptr;
     openturbo_packed_tile_header_t * device_headers = nullptr;
@@ -405,6 +530,15 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
         cuda_status = cudaMemcpy(&first_header, device_headers, sizeof(first_header), cudaMemcpyDeviceToHost);
     }
 
+    std::vector<openturbo_packed_tile_header_t> host_headers(static_cast<size_t>(num_tiles));
+    if (status == OPENTURBO_STATUS_SUCCESS && cuda_status == cudaSuccess) {
+        cuda_status = cudaMemcpy(
+            host_headers.data(),
+            device_headers,
+            sizeof(openturbo_packed_tile_header_t) * host_headers.size(),
+            cudaMemcpyDeviceToHost);
+    }
+
     if (device_headers != nullptr) {
         cudaFree(device_headers);
     }
@@ -413,11 +547,16 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
     }
 
     if (status == OPENTURBO_STATUS_SUCCESS && cuda_status == cudaSuccess) {
+        auto & sidecar = openturbo_get_or_reset_sidecar(layer_index, row_capacity, tiles_per_row);
+        const int stored_rows = openturbo_store_sidecar_rows(sidecar, row_indices, host_headers);
         std::fprintf(stderr,
-                     \"[openturbo] shadow_encode layer=%d status=success num_tiles=%d first_row=%lld cache=%s first_qword0=%llu\\n\",
-                     openturbo_parse_layer_index(dst_cache),
+                     \"[openturbo] shadow_encode layer=%d status=success num_tiles=%d tiles_per_row=%lld first_row=%lld stored_rows=%d sidecar_rows=%lld cache=%s first_qword0=%llu\\n\",
+                     layer_index,
                      num_tiles,
+                     static_cast<long long>(tiles_per_row),
                      openturbo_first_row_index(src_indices),
+                     stored_rows,
+                     static_cast<long long>(sidecar.row_capacity),
                      ggml_get_name(dst_cache),
                      static_cast<unsigned long long>(first_header.quadrant_word_0));
         if (state != nullptr) {
@@ -428,7 +567,7 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
 
     std::fprintf(stderr,
                  \"[openturbo] shadow_encode layer=%d status=failed openturbo=%d cuda=%d detail=%s\\n\",
-                 openturbo_parse_layer_index(dst_cache),
+                 layer_index,
                  static_cast<int>(status),
                  status == OPENTURBO_STATUS_SUCCESS ? static_cast<int>(cuda_status) : openturbo_cuda_status,
                  status == OPENTURBO_STATUS_SUCCESS ? cudaGetErrorString(cuda_status) : openturbo_status_string(status));
