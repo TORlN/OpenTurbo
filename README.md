@@ -63,3 +63,11 @@ On this workspace, the build assumes:
 * CUDA Toolkit is installed and available at the standard Windows location.
 * Visual Studio 2022 Build Tools are available for 64-bit host builds.
 * The target architecture is RTX 4090 (`sm_89`) unless overridden with `CMAKE_CUDA_ARCHITECTURES`.
+
+## Python Integration Layers
+
+The package now exposes three progressively higher-level entry points:
+
+* Raw launch wrappers in `openturbo.cuda_api` for integer device pointers.
+* Minimal CUDA runtime helpers in `openturbo.cuda_runtime` for Python-side device allocation and copies.
+* Tensor-style bridge helpers in `openturbo.tensor_api` for CUDA tensor-like objects that expose `data_ptr()`.

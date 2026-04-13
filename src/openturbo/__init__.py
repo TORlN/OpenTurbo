@@ -8,6 +8,18 @@ from .cuda_api import (
 	scan_query_many_cache,
 	scan_query_many_cache_multi_tile,
 )
+from .cuda_runtime import (
+	cuda_device_synchronize,
+	cuda_free,
+	cuda_malloc,
+	cuda_memcpy_device_to_host,
+	cuda_memcpy_host_to_device,
+)
+from .tensor_api import (
+	encode_tile_fused_tensor,
+	scan_query_many_cache_multi_tile_tensor,
+	scan_query_many_cache_tensor,
+)
 
 __all__ = [
 	"main",
@@ -17,4 +29,12 @@ __all__ = [
 	"scan_query_many_cache_multi_tile",
 	"is_cuda_extension_available",
 	"require_cuda_extension",
+	"cuda_malloc",
+	"cuda_free",
+	"cuda_memcpy_host_to_device",
+	"cuda_memcpy_device_to_host",
+	"cuda_device_synchronize",
+	"encode_tile_fused_tensor",
+	"scan_query_many_cache_tensor",
+	"scan_query_many_cache_multi_tile_tensor",
 ]
