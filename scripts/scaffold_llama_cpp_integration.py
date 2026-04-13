@@ -535,7 +535,41 @@ struct openturbo_shadow_score_summary {
     float mean_abs_error = 0.0f;
     float max_abs_error = 0.0f;
     int top_match = 0;
+    int64_t fwht_top_row = -1;
+    float fwht_top_score = 0.0f;
+    float fwht_first_score = 0.0f;
+    float fwht_mean_abs_error = 0.0f;
+    float fwht_max_abs_error = 0.0f;
+    float fwht_mean_scale_ratio = 0.0f;
+    int fwht_top_match = 0;
+    float component_first_main = 0.0f;
+    float component_first_residual = 0.0f;
+    float component_mean_main = 0.0f;
+    float component_mean_residual = 0.0f;
+    float box_first_score = 0.0f;
+    float box_mean_abs_error = 0.0f;
+    float box_max_abs_error = 0.0f;
+    int64_t box_top_row = -1;
+    float box_top_score = 0.0f;
+    int box_top_match = 0;
 };
+
+struct openturbo_scan_component_breakdown {
+    float main_polar_dot = 0.0f;
+    float residual_correction = 0.0f;
+};
+
+float openturbo_sign_from_bit(uint32_t bit) {
+    return bit != 0 ? 1.0f : -1.0f;
+}
+
+void openturbo_reconstruct_pair_from_code(uint32_t code, float scale, float & x_hat, float & y_hat) {
+    const uint32_t y_bit = code & 0x1u;
+    const uint32_t x_bit = (code >> 1) & 0x1u;
+    const float center = scale * 0.7071067811865475f;
+    x_hat = center * openturbo_sign_from_bit(x_bit);
+    y_hat = center * openturbo_sign_from_bit(y_bit);
+}
 
 openturbo_shadow_read_coverage openturbo_compute_mask_read_coverage(
     const ggml_tensor *                    cache_tensor,
@@ -731,6 +765,81 @@ float openturbo_dense_dot(const float * lhs, const float * rhs, int64_t count) {
     return total;
 }
 
+void openturbo_fwht128_cpu(float * values) {
+    for (int span = 1; span < OPENTURBO_TILE_DIMS; span <<= 1) {
+        const int step = span << 1;
+        for (int base = 0; base < OPENTURBO_TILE_DIMS; base += step) {
+            for (int index = 0; index < span; ++index) {
+                const float a = values[base + index];
+                const float b = values[base + index + span];
+                values[base + index] = a + b;
+                values[base + index + span] = a - b;
+            }
+        }
+    }
+}
+
+float openturbo_fwht_dot(const float * lhs, const float * rhs, int64_t count) {
+    if (count <= 0 || (count % OPENTURBO_TILE_DIMS) != 0) {
+        return 0.0f;
+    }
+
+    float total = 0.0f;
+    float lhs_tile[OPENTURBO_TILE_DIMS];
+    float rhs_tile[OPENTURBO_TILE_DIMS];
+    for (int64_t tile_base = 0; tile_base < count; tile_base += OPENTURBO_TILE_DIMS) {
+        std::memcpy(lhs_tile, lhs + tile_base, sizeof(lhs_tile));
+        std::memcpy(rhs_tile, rhs + tile_base, sizeof(rhs_tile));
+        openturbo_fwht128_cpu(lhs_tile);
+        openturbo_fwht128_cpu(rhs_tile);
+        total += openturbo_dense_dot(lhs_tile, rhs_tile, OPENTURBO_TILE_DIMS);
+    }
+    return total;
+}
+
+openturbo_scan_component_breakdown openturbo_estimate_scan_components(
+    const openturbo_packed_tile_header_t * query_headers,
+    const openturbo_packed_tile_header_t * cache_headers,
+    int                                    num_query_tiles) {
+    openturbo_scan_component_breakdown breakdown;
+    for (int tile_index = 0; tile_index < num_query_tiles; ++tile_index) {
+        const auto & query_header = query_headers[tile_index];
+        const auto & cache_header = cache_headers[tile_index];
+
+        const float query_scale = ggml_fp16_to_fp32(static_cast<ggml_fp16_t>(query_header.block_scale_fp16_bits));
+        const float cache_scale = ggml_fp16_to_fp32(static_cast<ggml_fp16_t>(cache_header.block_scale_fp16_bits));
+        const float local_alpha = ggml_fp16_to_fp32(static_cast<ggml_fp16_t>(cache_header.local_alpha_fp16_bits));
+
+        float main_polar_dot = 0.0f;
+        int qjl_correlation = 0;
+        for (int pair_index = 0; pair_index < 64; ++pair_index) {
+            const uint32_t q_code = pair_index < 32
+                ? static_cast<uint32_t>((query_header.quadrant_word_0 >> (2 * pair_index)) & 0x3ull)
+                : static_cast<uint32_t>((query_header.quadrant_word_1 >> (2 * (pair_index - 32))) & 0x3ull);
+            const uint32_t k_code = pair_index < 32
+                ? static_cast<uint32_t>((cache_header.quadrant_word_0 >> (2 * pair_index)) & 0x3ull)
+                : static_cast<uint32_t>((cache_header.quadrant_word_1 >> (2 * (pair_index - 32))) & 0x3ull);
+
+            float qx_hat = 0.0f;
+            float qy_hat = 0.0f;
+            float kx_hat = 0.0f;
+            float ky_hat = 0.0f;
+            openturbo_reconstruct_pair_from_code(q_code, query_scale, qx_hat, qy_hat);
+            openturbo_reconstruct_pair_from_code(k_code, cache_scale, kx_hat, ky_hat);
+            main_polar_dot += qx_hat * kx_hat + qy_hat * ky_hat;
+
+            const int q_bit = ((query_header.qjl_sign_word >> pair_index) & 0x1ull) ? 1 : -1;
+            const int k_bit = ((cache_header.qjl_sign_word >> pair_index) & 0x1ull) ? 1 : -1;
+            qjl_correlation += q_bit * k_bit;
+        }
+
+        breakdown.main_polar_dot += main_polar_dot;
+        breakdown.residual_correction += local_alpha * static_cast<float>(qjl_correlation);
+    }
+
+    return breakdown;
+}
+
 openturbo_shadow_score_summary openturbo_run_shadow_score(const ggml_tensor *                    q_tensor,
                                                           const ggml_tensor *                    k_tensor,
                                                           const ggml_tensor *                    cache_tensor,
@@ -869,9 +978,19 @@ openturbo_shadow_score_summary openturbo_run_shadow_score(const ggml_tensor *   
 
     {
         std::vector<float> host_scores(score_count);
+        std::vector<openturbo_packed_tile_header_t> host_query_headers(query_header_count);
         cuda_status = cudaMemcpy(host_scores.data(), device_scores, sizeof(float) * score_count, cudaMemcpyDeviceToHost);
         if (cuda_status != cudaSuccess) {
             summary.reason = "score_copy_failed";
+            goto cleanup;
+        }
+
+        cuda_status = cudaMemcpy(host_query_headers.data(),
+                                 device_query_headers,
+                                 sizeof(openturbo_packed_tile_header_t) * query_header_count,
+                                 cudaMemcpyDeviceToHost);
+        if (cuda_status != cudaSuccess) {
+            summary.reason = "query_header_copy_failed";
             goto cleanup;
         }
 
@@ -886,19 +1005,38 @@ openturbo_shadow_score_summary openturbo_run_shadow_score(const ggml_tensor *   
 
         float best_score = -INFINITY;
         float best_dense_score = -INFINITY;
+        float best_fwht_score = -INFINITY;
+        float best_box_score = -INFINITY;
         float total_abs_error = 0.0f;
+        float total_fwht_abs_error = 0.0f;
+        float total_fwht_scale_ratio = 0.0f;
+        float total_box_abs_error = 0.0f;
+        float total_component_main = 0.0f;
+        float total_component_residual = 0.0f;
+        int fwht_scale_ratio_count = 0;
         const int64_t rows_per_stream = openturbo_rows_per_stream(cache_tensor);
         const int64_t stream_base_index = openturbo_stream_base_index(cache_tensor);
         const int64_t local_row_base = stream_base_index * rows_per_stream;
-        std::vector<float> dense_scores(active_rows.size(), 0.0f);
         std::vector<float> k_row_values;
         for (size_t active_index = 0; active_index < active_rows.size(); ++active_index) {
             float mean_score = 0.0f;
             float mean_dense_score = 0.0f;
+            float mean_fwht_score = 0.0f;
+            float mean_component_main = 0.0f;
+            float mean_component_residual = 0.0f;
             const int64_t local_row = active_rows[active_index] - local_row_base;
             for (int head_index = 0; head_index < num_heads; ++head_index) {
                 const size_t score_offset = static_cast<size_t>(head_index) * active_rows.size() + active_index;
                 mean_score += host_scores[score_offset];
+
+                const auto component_breakdown = openturbo_estimate_scan_components(
+                    host_query_headers.data() + static_cast<size_t>(head_index * num_query_tiles),
+                    host_cache_headers.data() + score_offset * static_cast<size_t>(num_query_tiles),
+                    num_query_tiles);
+                total_component_main += component_breakdown.main_polar_dot;
+                total_component_residual += component_breakdown.residual_correction;
+                mean_component_main += component_breakdown.main_polar_dot;
+                mean_component_residual += component_breakdown.residual_correction;
 
                 if (!openturbo_copy_k_head_row_f32(k_tensor, local_row, head_index, k_row_values)) {
                     summary.reason = "unsupported_k_layout";
@@ -908,17 +1046,35 @@ openturbo_shadow_score_summary openturbo_run_shadow_score(const ggml_tensor *   
 
                 const float * const query_head = query_values.data() + static_cast<size_t>(head_index) * static_cast<size_t>(head_dim);
                 mean_dense_score += openturbo_dense_dot(query_head, k_row_values.data(), head_dim);
+                mean_fwht_score += openturbo_fwht_dot(query_head, k_row_values.data(), head_dim);
             }
             mean_score /= static_cast<float>(num_heads);
             mean_dense_score /= static_cast<float>(num_heads);
-            dense_scores[active_index] = mean_dense_score;
+            mean_fwht_score /= static_cast<float>(num_heads);
+            mean_component_main /= static_cast<float>(num_heads);
+            mean_component_residual /= static_cast<float>(num_heads);
+            const float mean_box_score = 0.5f * mean_component_main + mean_component_residual;
             const float abs_error = std::fabs(mean_score - mean_dense_score);
+            const float fwht_abs_error = std::fabs(mean_score - mean_fwht_score);
+            const float box_abs_error = std::fabs(mean_box_score - mean_fwht_score);
             total_abs_error += abs_error;
+            total_fwht_abs_error += fwht_abs_error;
+            total_box_abs_error += box_abs_error;
             summary.max_abs_error = std::max(summary.max_abs_error, abs_error);
+            summary.fwht_max_abs_error = std::max(summary.fwht_max_abs_error, fwht_abs_error);
+            summary.box_max_abs_error = std::max(summary.box_max_abs_error, box_abs_error);
+            if (std::fabs(mean_fwht_score) > 1.0e-6f) {
+                total_fwht_scale_ratio += mean_score / mean_fwht_score;
+                ++fwht_scale_ratio_count;
+            }
 
             if (active_index == 0) {
                 summary.first_score = mean_score;
                 summary.dense_first_score = mean_dense_score;
+                summary.fwht_first_score = mean_fwht_score;
+                summary.component_first_main = mean_component_main;
+                summary.component_first_residual = mean_component_residual;
+                summary.box_first_score = mean_box_score;
             }
             if (mean_score > best_score) {
                 best_score = mean_score;
@@ -930,10 +1086,27 @@ openturbo_shadow_score_summary openturbo_run_shadow_score(const ggml_tensor *   
                 summary.dense_top_score = mean_dense_score;
                 summary.dense_top_row = active_rows[active_index];
             }
+            if (mean_fwht_score > best_fwht_score) {
+                best_fwht_score = mean_fwht_score;
+                summary.fwht_top_score = mean_fwht_score;
+                summary.fwht_top_row = active_rows[active_index];
+            }
+            if (mean_box_score > best_box_score) {
+                best_box_score = mean_box_score;
+                summary.box_top_score = mean_box_score;
+                summary.box_top_row = active_rows[active_index];
+            }
         }
 
         summary.mean_abs_error = total_abs_error / static_cast<float>(active_rows.size());
         summary.top_match = summary.top_row == summary.dense_top_row ? 1 : 0;
+        summary.fwht_mean_abs_error = total_fwht_abs_error / static_cast<float>(active_rows.size());
+        summary.fwht_top_match = summary.top_row == summary.fwht_top_row ? 1 : 0;
+        summary.fwht_mean_scale_ratio = fwht_scale_ratio_count > 0 ? total_fwht_scale_ratio / static_cast<float>(fwht_scale_ratio_count) : 0.0f;
+        summary.component_mean_main = total_component_main / static_cast<float>(active_rows.size() * num_heads);
+        summary.component_mean_residual = total_component_residual / static_cast<float>(active_rows.size() * num_heads);
+        summary.box_mean_abs_error = total_box_abs_error / static_cast<float>(active_rows.size());
+        summary.box_top_match = summary.box_top_row == summary.fwht_top_row ? 1 : 0;
     }
 
 cleanup:
@@ -1036,20 +1209,45 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
                              static_cast<long long>(score_summary.top_row),
                              score_summary.top_score);
                 std::fprintf(stderr,
-                             "[openturbo] shadow_compare layer=%d status=success node=%s active_rows=%d top_match=%d first_row=%lld shadow_first=%.6f dense_first=%.6f shadow_top_row=%lld shadow_top=%.6f dense_top_row=%lld dense_top=%.6f mae=%.6f max_abs_error=%.6f\\n",
+                             "[openturbo] shadow_compare layer=%d status=success node=%s active_rows=%d raw_top_match=%d fwht_top_match=%d first_row=%lld shadow_first=%.6f raw_first=%.6f fwht_first=%.6f shadow_top_row=%lld shadow_top=%.6f raw_top_row=%lld raw_top=%.6f fwht_top_row=%lld fwht_top=%.6f raw_mae=%.6f raw_max_abs_error=%.6f fwht_mae=%.6f fwht_max_abs_error=%.6f fwht_mean_scale_ratio=%.6f\\n",
                              layer_index,
                              ggml_get_name(tensor),
                              score_summary.active_rows,
                              score_summary.top_match,
+                             score_summary.fwht_top_match,
                              static_cast<long long>(score_summary.first_row),
                              score_summary.first_score,
                              score_summary.dense_first_score,
+                             score_summary.fwht_first_score,
                              static_cast<long long>(score_summary.top_row),
                              score_summary.top_score,
                              static_cast<long long>(score_summary.dense_top_row),
                              score_summary.dense_top_score,
+                             static_cast<long long>(score_summary.fwht_top_row),
+                             score_summary.fwht_top_score,
                              score_summary.mean_abs_error,
-                             score_summary.max_abs_error);
+                             score_summary.max_abs_error,
+                             score_summary.fwht_mean_abs_error,
+                             score_summary.fwht_max_abs_error,
+                             score_summary.fwht_mean_scale_ratio);
+                std::fprintf(stderr,
+                             "[openturbo] shadow_components layer=%d status=success node=%s first_main=%.6f first_residual=%.6f mean_main=%.6f mean_residual=%.6f\\n",
+                             layer_index,
+                             ggml_get_name(tensor),
+                             score_summary.component_first_main,
+                             score_summary.component_first_residual,
+                             score_summary.component_mean_main,
+                             score_summary.component_mean_residual);
+                std::fprintf(stderr,
+                             "[openturbo] shadow_hypothesis layer=%d status=success node=%s box_top_match=%d box_first=%.6f box_top_row=%lld box_top=%.6f box_mae=%.6f box_max_abs_error=%.6f\\n",
+                             layer_index,
+                             ggml_get_name(tensor),
+                             score_summary.box_top_match,
+                             score_summary.box_first_score,
+                             static_cast<long long>(score_summary.box_top_row),
+                             score_summary.box_top_score,
+                             score_summary.box_mean_abs_error,
+                             score_summary.box_max_abs_error);
             } else {
                 std::fprintf(stderr,
                              "[openturbo] shadow_score layer=%d status=%s node=%s\\n",
@@ -1058,6 +1256,16 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
                              ggml_get_name(tensor));
                 std::fprintf(stderr,
                              "[openturbo] shadow_compare layer=%d status=%s node=%s\\n",
+                             layer_index,
+                             score_summary.reason,
+                             ggml_get_name(tensor));
+                std::fprintf(stderr,
+                             "[openturbo] shadow_components layer=%d status=%s node=%s\\n",
+                             layer_index,
+                             score_summary.reason,
+                             ggml_get_name(tensor));
+                std::fprintf(stderr,
+                             "[openturbo] shadow_hypothesis layer=%d status=%s node=%s\\n",
                              layer_index,
                              score_summary.reason,
                              ggml_get_name(tensor));

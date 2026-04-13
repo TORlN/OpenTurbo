@@ -11,6 +11,7 @@ namespace openturbo
     constexpr int kValuesPerLane = 4;
     constexpr int kPairsPerTile = 64;
     constexpr float kInvSqrt2 = 0.7071067811865475f;
+    constexpr float kBoxCenterCoord = 0.5f;
 
     struct alignas(32) PackedTileHeader
     {
@@ -102,6 +103,21 @@ namespace openturbo
         const float sx = sign_from_bit(x_bit);
         const float sy = sign_from_bit(y_bit);
         const float center = scale * kInvSqrt2;
+        x_hat = center * sx;
+        y_hat = center * sy;
+    }
+
+    __host__ __device__ __forceinline__ void reconstruct_pair_from_code_box_center(
+        uint32_t code,
+        float scale,
+        float &x_hat,
+        float &y_hat)
+    {
+        const uint32_t y_bit = code & 0x1u;
+        const uint32_t x_bit = (code >> 1) & 0x1u;
+        const float sx = sign_from_bit(x_bit);
+        const float sy = sign_from_bit(y_bit);
+        const float center = scale * kBoxCenterCoord;
         x_hat = center * sx;
         y_hat = center * sy;
     }

@@ -10,7 +10,7 @@ What exists today:
 
 * A fused encoder kernel that applies RoPE, runs a 128-wide FWHT, quantizes into a fixed 32-byte tile header, and emits a residual sign word.
 * A scan kernel that estimates query-cache dot products from packed headers, including the residual correction term.
-* CPU reference paths and smoke tests for the encoder and scan logic.
+* CPU reference paths and smoke tests for the encoder and scan logic, plus a reference-only box-center scan variant for calibration experiments before changing the CUDA kernel.
 * A Python extension build path using CMake and scikit-build-core.
 * A versioned native C ABI, a concrete head-local ggml-style adapter contract, a llama-facing request bridge, and a KV slicing shim for dense multi-head storage.
 
@@ -261,8 +261,10 @@ That patch set does two additional things during downstream execution:
 2. `shadow_read`: observes the first executed attention node whose source chain reaches both `cache_k_l*` and `attn_inp_kq_mask`, then reports exact active-row coverage derived from the downstream mask rather than the padded K-cache view extent.
 3. `shadow_score`: encodes the executed query heads in pre-rotated form, gathers the exact active sidecar rows, and runs a first OpenTurbo scan estimate over those rows. On grouped-query-attention models, it currently uses one representative query head per KV group.
 4. `shadow_compare`: computes a dense reference score from the executed flash-attention `q` and `k` tensors for the same exact active rows, then reports rank agreement and error metrics against `shadow_score`.
+5. `shadow_components`: splits the packed estimator into its quadrant main term and residual-correction term so calibration failures can be attributed to the right part of the approximation.
+6. `shadow_hypothesis`: logs a probe-only “box-center” variant that halves the main quadrant term, used to test whether the current pair reconstruction geometry is the dominant source of over-scale.
 
-At the current stage this remains a probe path, not a full attention replacement. The read-side path now uses exact mask-derived rows, and the score path is still experimental logging rather than a substitution for llama.cpp attention. On the current Llama-3.1-8B probe, `shadow_compare` reports a matching top row on the tiny active set but a large absolute score gap, which means row ordering may be promising while calibration is still far from usable.
+At the current stage this remains a probe path, not a full attention replacement. The read-side path now uses exact mask-derived rows, and the score path is still experimental logging rather than a substitution for llama.cpp attention. On the current Llama-3.1-8B probe, `shadow_compare` reports a matching top row on the tiny active set but a large absolute score gap. The new diagnostics show that the remaining over-scale is dominated by the quadrant main term rather than the residual correction term, and that a probe-only box-center variant materially reduces the FWHT-domain error while preserving the top-row match.
 
 ## Current Validation
 
@@ -270,12 +272,14 @@ The repo is currently validated at three levels:
 
 * Python tests via `pytest`, including scaffold generation, downstream patch idempotency, and probe-output parsing.
 * Native CUDA smoke coverage via `build\c_api_smoke_test.exe`.
-* Downstream llama.cpp execution via `scripts\run_llama_cpp_k_cache_probe.py`, which now requires all five runtime lines:
+* Downstream llama.cpp execution via `scripts\run_llama_cpp_k_cache_probe.py`, which now requires all seven runtime lines:
 	* `cpy_k probe`
 	* `shadow_encode`
 	* `shadow_read`
 	* `shadow_score`
 	* `shadow_compare`
+	* `shadow_components`
+	* `shadow_hypothesis`
 
 The generated files are intentionally small and explicit. They wrap real `ggml_tensor` objects through `include/openturbo/ggml_downstream.hpp`, but you still need to connect them to the actual llama.cpp call site that owns the K/V cache tensors.
 
@@ -283,6 +287,6 @@ The generated files are intentionally small and explicit. They wrap real `ggml_t
 
 Likely next engineering steps are:
 
-1. Reduce the calibration gap exposed by `shadow_compare`, starting with scale/alignment analysis between the packed-header estimator and dense attention scores.
+1. Validate the new reference-only box-center estimator across more prompts, rows, and layers, then port it into the CUDA scan kernel if the improvement holds up.
 2. Expand the score probe beyond the current single-stream/representative-head prototype to broader batching and GQA handling.
 3. Add model-level validation and profiler-driven performance work once the downstream bridge starts influencing attention results.

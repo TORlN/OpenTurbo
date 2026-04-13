@@ -5,6 +5,7 @@
 
 #include <cuda_runtime.h>
 
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -20,6 +21,7 @@ namespace
     {
         const char *name;
         openturbo::PackedTileHeader header;
+        std::array<float, openturbo::kTileDims> input;
     };
 
     struct ScanPairCase
@@ -114,7 +116,49 @@ namespace
         TileCase tile_case{};
         tile_case.name = name;
         tile_case.header = openturbo::pack_reference_header(reference);
+        for (int index = 0; index < openturbo::kTileDims; ++index)
+        {
+            tile_case.input[static_cast<size_t>(index)] = input[index];
+        }
         return tile_case;
+    }
+
+    float compute_fwht_dot(const TileCase &lhs, const TileCase &rhs)
+    {
+        float lhs_transformed[openturbo::kTileDims];
+        float rhs_transformed[openturbo::kTileDims];
+        for (int index = 0; index < openturbo::kTileDims; ++index)
+        {
+            lhs_transformed[index] = lhs.input[static_cast<size_t>(index)];
+            rhs_transformed[index] = rhs.input[static_cast<size_t>(index)];
+        }
+
+        openturbo::fwht128_cpu(lhs_transformed);
+        openturbo::fwht128_cpu(rhs_transformed);
+
+        float total = 0.0f;
+        for (int index = 0; index < openturbo::kTileDims; ++index)
+        {
+            total += lhs_transformed[index] * rhs_transformed[index];
+        }
+        return total;
+    }
+
+    void print_reference_calibration(const TileCase &query_case, const TileCase &cache_case)
+    {
+        const float fwht_exact = compute_fwht_dot(query_case, cache_case);
+        const float corner_estimate = openturbo::estimate_scan_dot(query_case.header, cache_case.header);
+        const float box_estimate = openturbo::estimate_scan_dot_box_center(query_case.header, cache_case.header);
+
+        std::printf(
+            "CALIBRATION: %s x %s fwht_exact=%f corner=%f box=%f corner_abs_error=%f box_abs_error=%f\n",
+            query_case.name,
+            cache_case.name,
+            fwht_exact,
+            corner_estimate,
+            box_estimate,
+            std::fabs(corner_estimate - fwht_exact),
+            std::fabs(box_estimate - fwht_exact));
     }
 
     MultiTileScanCase make_multi_tile_case(
@@ -338,6 +382,12 @@ int main()
     run_scan_batch(sparse, sparse_query_cases, 3);
     run_multi_tile_scan_case(multi_tile_case);
     run_benchmark_smoke(multi_tile_case);
+
+    std::printf("\nREFERENCE CALIBRATION SNAPSHOT\n");
+    print_reference_calibration(alternating, alternating);
+    print_reference_calibration(alternating, random);
+    print_reference_calibration(random, sparse);
+    print_reference_calibration(sparse, sparse);
 
     std::printf("\nPASS: GPU scan kernel matches CPU reference.\n");
 
