@@ -197,6 +197,21 @@ scripts\bootstrap_llama_cpp_integration.bat
 
 That will clone llama.cpp into a local `llama` directory if needed, generate the OpenTurbo scaffold under `llama\examples\openturbo`, and apply the experimental `cpy_k()` probe patch automatically.
 
+If you want the full downstream probe workflow in one command, including configure, build, tiny-model download, and probe execution:
+
+```powershell
+.venv\Scripts\python.exe scripts\run_llama_cpp_k_cache_probe.py
+```
+
+That single script will:
+
+1. Bootstrap or reuse a local llama.cpp checkout.
+2. Generate the OpenTurbo scaffold.
+3. Apply the experimental `cpy_k()` probe patch.
+4. Configure and build a probe-enabled downstream tree.
+5. Download the tiny `stories15M-q4_0.gguf` model.
+6. Run `llama-eval-callback` and print the one-line OpenTurbo probe result.
+
 If you run the script with no arguments, it will create a local `llama` directory in the current working directory and write the scaffold there:
 
 ```powershell

@@ -10,6 +10,10 @@ if not exist "%PYTHON%" (
     exit /b 1
 )
 
+echo For the full one-command bootstrap, build, model-download, and probe-run flow use:
+echo   %PYTHON% "%WORKSPACE_DIR%\scripts\run_llama_cpp_k_cache_probe.py"
+echo.
+
 if "%~1"=="" (
     "%PYTHON%" "%WORKSPACE_DIR%\scripts\scaffold_llama_cpp_integration.py" --bootstrap --probe-k-cache --force
 ) else (
