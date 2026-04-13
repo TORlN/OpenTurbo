@@ -78,3 +78,13 @@ The CUDA build now exposes two native integration surfaces above the kernel wrap
 
 * A shared internal CUDA core used by both the Python extension and the exported C ABI.
 * An exported C header at `include/openturbo/c_api.h` for future ggml / llama.cpp integration without pybind11.
+
+The native ABI now has an explicit version and status contract:
+
+* `openturbo_get_c_api_version()` returns the packed ABI version declared in `include/openturbo/c_api.h`.
+* Public entry points return `openturbo_status_t`, while raw CUDA launch status is reported separately via `cuda_status_out`.
+* `openturbo_status_string()` and `openturbo_cuda_error_string()` provide stable text for logging and downstream error handling.
+
+The first ggml-facing adapter lives in `include/openturbo/ggml_adapter.h`. It accepts flat ggml-style tensor metadata (`data`, `ne`, `nb`, element type, and stream context) and maps validated contiguous buffers onto the C ABI.
+
+A direct native smoke path is available in VS Code via the `Build C API Smoke Test` and `Run C API Smoke Test` tasks.
