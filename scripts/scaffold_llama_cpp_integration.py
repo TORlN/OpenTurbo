@@ -517,6 +517,20 @@ struct openturbo_shadow_read_coverage {
     bool exact = false;
 };
 
+struct openturbo_shadow_score_summary {
+    bool success = false;
+    const char * reason = "unsupported";
+    int num_heads = 0;
+    int num_query_heads = 0;
+    int query_head_group = 0;
+    int num_query_tiles = 0;
+    int active_rows = 0;
+    int64_t top_row = -1;
+    float top_score = 0.0f;
+    int64_t first_row = -1;
+    float first_score = 0.0f;
+};
+
 openturbo_shadow_read_coverage openturbo_compute_mask_read_coverage(
     const ggml_tensor *                    cache_tensor,
     const ggml_tensor *                    mask_tensor,
@@ -570,6 +584,283 @@ openturbo_shadow_read_coverage openturbo_compute_mask_read_coverage(
 
     coverage.exact = true;
     return coverage;
+}
+
+bool openturbo_collect_active_rows_single_query(const ggml_tensor * cache_tensor,
+                                                const ggml_tensor * mask_tensor,
+                                                std::vector<int64_t> & active_rows) {
+    active_rows.clear();
+    if (cache_tensor == nullptr || mask_tensor == nullptr) {
+        return false;
+    }
+
+    const int64_t n_kv = mask_tensor->ne[0];
+    const int64_t n_tokens_per_stream = mask_tensor->ne[1];
+    const int64_t n_stream = mask_tensor->ne[3];
+    const int64_t rows_per_stream = openturbo_rows_per_stream(cache_tensor);
+    const int64_t stream_base_index = openturbo_stream_base_index(cache_tensor);
+    if (n_kv <= 0 || n_tokens_per_stream <= 0 || n_stream != 1 || rows_per_stream <= 0 || stream_base_index < 0) {
+        return false;
+    }
+
+    std::vector<float> mask_values;
+    if (!openturbo_copy_mask_values(mask_tensor, mask_values)) {
+        return false;
+    }
+
+    active_rows.reserve(static_cast<size_t>(n_kv));
+    const int64_t global_stream_base = stream_base_index * rows_per_stream;
+    const size_t token_offset = static_cast<size_t>(n_tokens_per_stream - 1) * static_cast<size_t>(n_kv);
+    for (int64_t row = 0; row < n_kv; ++row) {
+        if (!std::isfinite(mask_values[token_offset + static_cast<size_t>(row)])) {
+            continue;
+        }
+
+        const int64_t global_row = global_stream_base + row;
+        active_rows.push_back(global_row);
+    }
+
+    return !active_rows.empty();
+}
+
+bool openturbo_copy_query_block_f32(const ggml_tensor * tensor,
+                                    int                 num_selected_heads,
+                                    int                 query_head_group,
+                                    std::vector<float> & query_values) {
+    query_values.clear();
+    if (tensor == nullptr || tensor->ne[0] <= 0 || tensor->ne[1] <= 0 || tensor->ne[3] != 1) {
+        return false;
+    }
+
+    const int64_t head_dim = tensor->ne[0];
+    const int64_t num_heads = tensor->ne[2];
+    if (num_selected_heads <= 0 || query_head_group <= 0 || num_heads < static_cast<int64_t>(num_selected_heads * query_head_group)) {
+        return false;
+    }
+
+    const size_t value_count = static_cast<size_t>(head_dim) * static_cast<size_t>(num_selected_heads);
+    query_values.resize(value_count);
+
+    const size_t base_offset = static_cast<size_t>(tensor->ne[1] - 1) * static_cast<size_t>(tensor->nb[1]);
+    if (tensor->type == GGML_TYPE_F32 && tensor->nb[0] == sizeof(float) && tensor->nb[2] == tensor->nb[0] * tensor->ne[0]) {
+        for (int head_index = 0; head_index < num_selected_heads; ++head_index) {
+            const size_t src_offset = base_offset + static_cast<size_t>(head_index * query_head_group) * static_cast<size_t>(tensor->nb[2]);
+            float * const dst = query_values.data() + static_cast<size_t>(head_index) * static_cast<size_t>(head_dim);
+            if (tensor->buffer != nullptr && ggml_backend_buffer_is_host(tensor->buffer)) {
+                std::memcpy(dst, static_cast<const char *>(tensor->data) + src_offset, sizeof(float) * static_cast<size_t>(head_dim));
+            } else {
+                ggml_backend_tensor_get(tensor, dst, src_offset, sizeof(float) * static_cast<size_t>(head_dim));
+            }
+        }
+        return true;
+    }
+
+    if (tensor->type == GGML_TYPE_F16 && tensor->nb[0] == sizeof(ggml_fp16_t) && tensor->nb[2] == tensor->nb[0] * tensor->ne[0]) {
+        std::vector<ggml_fp16_t> raw(static_cast<size_t>(head_dim));
+        for (int head_index = 0; head_index < num_selected_heads; ++head_index) {
+            const size_t src_offset = base_offset + static_cast<size_t>(head_index * query_head_group) * static_cast<size_t>(tensor->nb[2]);
+            if (tensor->buffer != nullptr && ggml_backend_buffer_is_host(tensor->buffer)) {
+                std::memcpy(raw.data(), static_cast<const char *>(tensor->data) + src_offset, sizeof(ggml_fp16_t) * static_cast<size_t>(head_dim));
+            } else {
+                ggml_backend_tensor_get(tensor, raw.data(), src_offset, sizeof(ggml_fp16_t) * static_cast<size_t>(head_dim));
+            }
+
+            float * const dst = query_values.data() + static_cast<size_t>(head_index) * static_cast<size_t>(head_dim);
+            for (size_t value_index = 0; value_index < raw.size(); ++value_index) {
+                dst[value_index] = ggml_fp16_to_fp32(raw[value_index]);
+            }
+        }
+        return true;
+    }
+
+    return false;
+}
+
+openturbo_shadow_score_summary openturbo_run_shadow_score(const ggml_tensor *                    q_tensor,
+                                                          const ggml_tensor *                    cache_tensor,
+                                                          const ggml_tensor *                    mask_tensor,
+                                                          const openturbo_shadow_layer_sidecar & sidecar) {
+    openturbo_shadow_score_summary summary;
+    if (q_tensor == nullptr || cache_tensor == nullptr || mask_tensor == nullptr) {
+        summary.reason = "missing_tensor";
+        return summary;
+    }
+
+    std::vector<int64_t> active_rows;
+    if (!openturbo_collect_active_rows_single_query(cache_tensor, mask_tensor, active_rows)) {
+        summary.reason = "unsupported_mask_shape";
+        return summary;
+    }
+
+    const int64_t head_dim = q_tensor->ne[0];
+    if (head_dim <= 0 || (head_dim % OPENTURBO_TILE_DIMS) != 0) {
+        summary.reason = "unsupported_head_dim";
+        return summary;
+    }
+
+    const int num_query_tiles = static_cast<int>(head_dim / OPENTURBO_TILE_DIMS);
+    const int num_query_heads = static_cast<int>(q_tensor->ne[2]);
+    const int num_heads = static_cast<int>(sidecar.tiles_per_row / num_query_tiles);
+    if (num_query_heads <= 0 || num_heads <= 0 || sidecar.tiles_per_row != static_cast<int64_t>(num_query_tiles) * num_heads) {
+        summary.reason = "sidecar_shape_mismatch";
+        return summary;
+    }
+
+    if (num_query_heads % num_heads != 0) {
+        summary.reason = "unsupported_gqa_ratio";
+        return summary;
+    }
+
+    const int query_head_group = num_query_heads / num_heads;
+    std::vector<float> query_values;
+    if (!openturbo_copy_query_block_f32(q_tensor, num_heads, query_head_group, query_values)) {
+        summary.reason = "unsupported_query_layout";
+        return summary;
+    }
+
+    int device_count = 0;
+    cudaError_t cuda_status = cudaGetDeviceCount(&device_count);
+    if (cuda_status != cudaSuccess || device_count <= 0) {
+        summary.reason = "no_cuda_device";
+        return summary;
+    }
+
+    std::vector<openturbo_packed_tile_header_t> host_cache_headers(
+        static_cast<size_t>(num_heads) * active_rows.size() * static_cast<size_t>(num_query_tiles));
+    for (size_t active_index = 0; active_index < active_rows.size(); ++active_index) {
+        const int64_t row_index = active_rows[active_index];
+        if (row_index < 0 || row_index >= sidecar.row_capacity) {
+            summary.reason = "active_row_oob";
+            return summary;
+        }
+
+        const size_t row_offset = static_cast<size_t>(row_index) * static_cast<size_t>(sidecar.tiles_per_row);
+        for (int head_index = 0; head_index < num_heads; ++head_index) {
+            const size_t src_offset = row_offset + static_cast<size_t>(head_index * num_query_tiles);
+            const size_t dst_offset = (static_cast<size_t>(head_index) * active_rows.size() + active_index) *
+                                      static_cast<size_t>(num_query_tiles);
+            std::copy_n(sidecar.headers.data() + src_offset,
+                        static_cast<size_t>(num_query_tiles),
+                        host_cache_headers.data() + dst_offset);
+        }
+    }
+
+    float * device_query_input = nullptr;
+    openturbo_packed_tile_header_t * device_query_headers = nullptr;
+    openturbo_packed_tile_header_t * device_cache_headers = nullptr;
+    float * device_scores = nullptr;
+
+    const size_t query_input_bytes = sizeof(float) * query_values.size();
+    const size_t query_header_count = static_cast<size_t>(num_heads) * static_cast<size_t>(num_query_tiles);
+    const size_t cache_header_count = host_cache_headers.size();
+    const size_t score_count = static_cast<size_t>(num_heads) * active_rows.size();
+
+    cuda_status = cudaMalloc(&device_query_input, query_input_bytes);
+    if (cuda_status == cudaSuccess) {
+        cuda_status = cudaMalloc(&device_query_headers, sizeof(openturbo_packed_tile_header_t) * query_header_count);
+    }
+    if (cuda_status == cudaSuccess) {
+        cuda_status = cudaMalloc(&device_cache_headers, sizeof(openturbo_packed_tile_header_t) * cache_header_count);
+    }
+    if (cuda_status == cudaSuccess) {
+        cuda_status = cudaMalloc(&device_scores, sizeof(float) * score_count);
+    }
+    if (cuda_status != cudaSuccess) {
+        summary.reason = "cuda_alloc_failed";
+        goto cleanup;
+    }
+
+    cuda_status = cudaMemcpy(device_query_input, query_values.data(), query_input_bytes, cudaMemcpyHostToDevice);
+    if (cuda_status == cudaSuccess) {
+        cuda_status = cudaMemcpy(device_cache_headers,
+                                 host_cache_headers.data(),
+                                 sizeof(openturbo_packed_tile_header_t) * cache_header_count,
+                                 cudaMemcpyHostToDevice);
+    }
+    if (cuda_status != cudaSuccess) {
+        summary.reason = "cuda_memcpy_failed";
+        goto cleanup;
+    }
+
+    {
+        int openturbo_cuda_status = 0;
+        const openturbo_status_t encode_status = openturbo_encode_tile_fused_prerotated(
+            device_query_input,
+            device_query_headers,
+            static_cast<int>(query_header_count),
+            nullptr,
+            &openturbo_cuda_status);
+        if (encode_status != OPENTURBO_STATUS_SUCCESS) {
+            summary.reason = "query_encode_failed";
+            goto cleanup;
+        }
+
+        for (int head_index = 0; head_index < num_heads; ++head_index) {
+            const openturbo_status_t scan_status = openturbo_scan_query_many_cache_multi_tile(
+                device_query_headers + static_cast<size_t>(head_index * num_query_tiles),
+                device_cache_headers + static_cast<size_t>(head_index) * active_rows.size() * static_cast<size_t>(num_query_tiles),
+                device_scores + static_cast<size_t>(head_index) * active_rows.size(),
+                num_query_tiles,
+                static_cast<int>(active_rows.size()),
+                nullptr,
+                &openturbo_cuda_status);
+            if (scan_status != OPENTURBO_STATUS_SUCCESS) {
+                summary.reason = "cache_scan_failed";
+                goto cleanup;
+            }
+        }
+    }
+
+    {
+        std::vector<float> host_scores(score_count);
+        cuda_status = cudaMemcpy(host_scores.data(), device_scores, sizeof(float) * score_count, cudaMemcpyDeviceToHost);
+        if (cuda_status != cudaSuccess) {
+            summary.reason = "score_copy_failed";
+            goto cleanup;
+        }
+
+        summary.success = true;
+        summary.reason = "success";
+        summary.num_heads = num_heads;
+        summary.num_query_heads = num_query_heads;
+        summary.query_head_group = query_head_group;
+        summary.num_query_tiles = num_query_tiles;
+        summary.active_rows = static_cast<int>(active_rows.size());
+        summary.first_row = active_rows.front();
+
+        float best_score = -INFINITY;
+        for (size_t active_index = 0; active_index < active_rows.size(); ++active_index) {
+            float mean_score = 0.0f;
+            for (int head_index = 0; head_index < num_heads; ++head_index) {
+                mean_score += host_scores[static_cast<size_t>(head_index) * active_rows.size() + active_index];
+            }
+            mean_score /= static_cast<float>(num_heads);
+
+            if (active_index == 0) {
+                summary.first_score = mean_score;
+            }
+            if (mean_score > best_score) {
+                best_score = mean_score;
+                summary.top_score = mean_score;
+                summary.top_row = active_rows[active_index];
+            }
+        }
+    }
+
+cleanup:
+    if (device_scores != nullptr) {
+        cudaFree(device_scores);
+    }
+    if (device_cache_headers != nullptr) {
+        cudaFree(device_cache_headers);
+    }
+    if (device_query_headers != nullptr) {
+        cudaFree(device_query_headers);
+    }
+    if (device_query_input != nullptr) {
+        cudaFree(device_query_input);
+    }
+    return summary;
 }
 
 bool openturbo_is_read_candidate(const ggml_tensor * tensor) {
@@ -631,13 +922,38 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
         }
 
         std::fprintf(stderr,
-                     \"[openturbo] shadow_read layer=%d status=%s node=%s expected_rows=%lld present_rows=%d tiles_per_row=%lld\\n\",
+                     "[openturbo] shadow_read layer=%d status=%s node=%s expected_rows=%lld present_rows=%d tiles_per_row=%lld\\n",
                      layer_index,
                      coverage.present_rows == coverage.expected_rows ? "success" : "partial",
                      ggml_get_name(tensor),
                      static_cast<long long>(coverage.expected_rows),
                      coverage.present_rows,
                      static_cast<long long>(sidecar.tiles_per_row));
+
+        if (tensor->op == GGML_OP_FLASH_ATTN_EXT) {
+            const auto score_summary = openturbo_run_shadow_score(tensor->src[0], cache_tensor, mask_tensor, sidecar);
+            if (score_summary.success) {
+                std::fprintf(stderr,
+                             "[openturbo] shadow_score layer=%d status=success node=%s active_rows=%d num_heads=%d num_query_heads=%d query_head_group=%d num_query_tiles=%d first_row=%lld first_score=%.6f top_row=%lld top_score=%.6f\\n",
+                             layer_index,
+                             ggml_get_name(tensor),
+                             score_summary.active_rows,
+                             score_summary.num_heads,
+                             score_summary.num_query_heads,
+                             score_summary.query_head_group,
+                             score_summary.num_query_tiles,
+                             static_cast<long long>(score_summary.first_row),
+                             score_summary.first_score,
+                             static_cast<long long>(score_summary.top_row),
+                             score_summary.top_score);
+            } else {
+                std::fprintf(stderr,
+                             "[openturbo] shadow_score layer=%d status=%s node=%s\\n",
+                             layer_index,
+                             score_summary.reason,
+                             ggml_get_name(tensor));
+            }
+        }
         if (state != nullptr) {
             state->logged_read_once = true;
         }

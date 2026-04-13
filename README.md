@@ -211,7 +211,7 @@ That single script will:
 4. Refresh the local OpenTurbo editable install so the downstream build links against the current native library.
 5. Configure and build a probe-enabled downstream tree.
 6. Download the default `Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf` model.
-7. Run `llama-eval-callback` and print the `cpy_k probe`, `shadow_encode`, and `shadow_read` result lines.
+7. Run `llama-eval-callback` and print the `cpy_k probe`, `shadow_encode`, `shadow_read`, and `shadow_score` result lines.
 
 If you run the script with no arguments, it will create a local `llama` directory in the current working directory and write the scaffold there:
 
@@ -258,9 +258,10 @@ If you also want the execution-time shadow encode and sidecar read probe patch i
 That patch set does two additional things during downstream execution:
 
 1. `shadow_encode`: runs the pre-rotated OpenTurbo encoder on executed `GGML_OP_SET_ROWS` K-cache writes and stores the packed headers in a per-layer sidecar keyed by cache row index.
-2. `shadow_read`: observes the first executed non-`SET_ROWS` node whose source chain reaches `cache_k_l*` and reports how much of the requested K-read window is currently covered by the sidecar.
+2. `shadow_read`: observes the first executed attention node whose source chain reaches both `cache_k_l*` and `attn_inp_kq_mask`, then reports exact active-row coverage derived from the downstream mask rather than the padded K-cache view extent.
+3. `shadow_score`: encodes the executed query heads in pre-rotated form, gathers the exact active sidecar rows, and runs a first OpenTurbo scan estimate over those rows. On grouped-query-attention models, it currently uses one representative query head per KV group.
 
-At the current stage this read-side result is expected to be coverage-oriented, not a full attention replacement. On the current llama.cpp graph the read probe can report `partial` because the graph reuses a padded K-cache view that extends beyond rows written in the current step.
+At the current stage this remains a probe path, not a full attention replacement. The read-side path now uses exact mask-derived rows, and the score path is still experimental logging rather than a substitution for llama.cpp attention.
 
 ## Current Validation
 
@@ -268,10 +269,11 @@ The repo is currently validated at three levels:
 
 * Python tests via `pytest`, including scaffold generation, downstream patch idempotency, and probe-output parsing.
 * Native CUDA smoke coverage via `build\c_api_smoke_test.exe`.
-* Downstream llama.cpp execution via `scripts\run_llama_cpp_k_cache_probe.py`, which now requires all three runtime lines:
+* Downstream llama.cpp execution via `scripts\run_llama_cpp_k_cache_probe.py`, which now requires all four runtime lines:
 	* `cpy_k probe`
 	* `shadow_encode`
 	* `shadow_read`
+	* `shadow_score`
 
 The generated files are intentionally small and explicit. They wrap real `ggml_tensor` objects through `include/openturbo/ggml_downstream.hpp`, but you still need to connect them to the actual llama.cpp call site that owns the K/V cache tensors.
 
@@ -279,6 +281,6 @@ The generated files are intentionally small and explicit. They wrap real `ggml_t
 
 Likely next engineering steps are:
 
-1. Replace the current prefix-based read coverage check with exact active-row tracking from the downstream K-read path.
-2. Turn the sidecar read probe into a first score-path experiment that consumes packed metadata for the active rows only.
+1. Compare the experimental `shadow_score` estimate against the dense score path for the same active rows and quantify the gap.
+2. Expand the score probe beyond the current single-stream/representative-head prototype to broader batching and GQA handling.
 3. Add model-level validation and profiler-driven performance work once the downstream bridge starts influencing attention results.

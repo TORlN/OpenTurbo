@@ -108,6 +108,7 @@ def test_generate_scaffold_writes_shadow_and_bridge_files(tmp_path: Path) -> Non
     shadow_text = (output_root / "openturbo_shadow_eval_callback.cpp").read_text(encoding="utf-8")
     assert "attn_inp_kq_mask" in shadow_text
     assert "openturbo_compute_mask_read_coverage" in shadow_text
+    assert "shadow_score" in shadow_text
 
 
 def test_apply_probe_patch_is_idempotent(tmp_path: Path) -> None:
@@ -151,14 +152,16 @@ def test_parse_probe_output_requires_both_lines() -> None:
             "[openturbo] cpy_k probe layer=0 compatible=1 head_dim=128",
             "[openturbo] shadow_encode layer=0 status=success num_tiles=16",
             "[openturbo] shadow_read layer=0 status=success node=kq-0 expected_rows=1 present_rows=1 tiles_per_row=8",
+            "[openturbo] shadow_score layer=0 status=success node=kq-0 active_rows=1 num_heads=8 num_query_tiles=1 first_row=0 first_score=1.0 top_row=0 top_score=1.0",
         ]
     )
 
-    probe_line, shadow_line, shadow_read_line = probe_runner.parse_probe_output(output, 0)
+    probe_line, shadow_line, shadow_read_line, shadow_score_line = probe_runner.parse_probe_output(output, 0)
 
     assert probe_line.startswith("[openturbo] cpy_k probe")
     assert shadow_line.startswith("[openturbo] shadow_encode")
     assert shadow_read_line.startswith("[openturbo] shadow_read")
+    assert shadow_score_line.startswith("[openturbo] shadow_score")
 
 
 def test_parse_probe_output_rejects_missing_shadow_line() -> None:
@@ -175,6 +178,19 @@ def test_parse_probe_output_rejects_missing_shadow_read_line() -> None:
     )
 
     with pytest.raises(RuntimeError, match="shadow_read"):
+        probe_runner.parse_probe_output(output, 0)
+
+
+def test_parse_probe_output_rejects_missing_shadow_score_line() -> None:
+    output = "\n".join(
+        [
+            "[openturbo] cpy_k probe layer=0 compatible=1 head_dim=128",
+            "[openturbo] shadow_encode layer=0 status=success num_tiles=16",
+            "[openturbo] shadow_read layer=0 status=success node=kq-0 expected_rows=1 present_rows=1 tiles_per_row=8",
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="shadow_score"):
         probe_runner.parse_probe_output(output, 0)
 
 
