@@ -1,54 +1,26 @@
 #include "fwht.cuh"
+#include "encoder_layout.cuh"
 
-#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
 #include <math.h>
-#include <stdint.h>
 
 namespace openturbo
 {
-    constexpr int kTileDims = 128;
-    constexpr int kValuesPerLane = 4;
-    constexpr float kInvSqrt2 = 0.7071067811865475f;
-
-    struct alignas(32) PackedTileHeader
+    struct LaneValues
     {
-        uint64_t quadrant_word_0;
-        uint64_t quadrant_word_1;
-        uint64_t qjl_sign_word;
-        __half block_scale_fp16;
-        __half local_alpha_fp16;
-        uint32_t reserved_u32;
+        float r0;
+        float r1;
+        float r2;
+        float r3;
     };
 
-    __device__ __forceinline__ float rope_angle(
-        int pair_index,
-        int token_pos,
-        float rope_theta)
+    struct LaneQuantization
     {
-        const float exponent = (2.0f * static_cast<float>(pair_index)) / static_cast<float>(kTileDims);
-        const float inv_freq = __powf(rope_theta, -exponent);
-        return static_cast<float>(token_pos) * inv_freq;
-    }
-
-    __device__ __forceinline__ void apply_rope_pair(
-        float &x,
-        float &y,
-        int pair_index,
-        int token_pos,
-        float rope_theta)
-    {
-        const float angle = rope_angle(pair_index, token_pos, rope_theta);
-        float s, c;
-        __sincosf(angle, &s, &c);
-
-        const float x_old = x;
-        const float y_old = y;
-
-        x = x_old * c - y_old * s;
-        y = x_old * s + y_old * c;
-    }
+        uint32_t quadrant_fragment;
+        uint32_t qjl_fragment;
+        float alpha_sum;
+    };
 
     __device__ __forceinline__ float warp_reduce_max(float value)
     {
@@ -70,57 +42,64 @@ namespace openturbo
         return value;
     }
 
-    __device__ __forceinline__ uint32_t sign_bit_from_value(float value)
+    __device__ __forceinline__ LaneValues load_lane_values(
+        const float *__restrict__ input,
+        int lane_base)
     {
-        return (value >= 0.0f) ? 1u : 0u;
+        LaneValues values{};
+        values.r0 = input[lane_base + 0];
+        values.r1 = input[lane_base + 1];
+        values.r2 = input[lane_base + 2];
+        values.r3 = input[lane_base + 3];
+        return values;
     }
 
-    __device__ __forceinline__ float sign_from_bit(uint32_t bit)
+    __device__ __forceinline__ void apply_rope_to_lane(
+        LaneValues &values,
+        int lane_id,
+        int token_pos,
+        float rope_theta)
     {
-        return bit ? 1.0f : -1.0f;
+        apply_rope_pair(values.r0, values.r1, 2 * lane_id + 0, token_pos, rope_theta);
+        apply_rope_pair(values.r2, values.r3, 2 * lane_id + 1, token_pos, rope_theta);
     }
 
-    __device__ __forceinline__ uint32_t encode_quadrant_code(float x, float y)
+    __device__ __forceinline__ void apply_fwht_to_lane(LaneValues &values, int lane_id)
     {
-        const uint32_t x_bit = sign_bit_from_value(x);
-        const uint32_t y_bit = sign_bit_from_value(y);
-        return (x_bit << 1) | y_bit;
+        fwht128_inplace(values.r0, values.r1, values.r2, values.r3, lane_id);
     }
 
-    __device__ __forceinline__ void reconstruct_pair_from_code(
-        uint32_t code,
-        float scale,
-        float &x_hat,
-        float &y_hat)
+    __device__ __forceinline__ float lane_abs_max(const LaneValues &values)
     {
-        const uint32_t y_bit = code & 0x1u;
-        const uint32_t x_bit = (code >> 1) & 0x1u;
-
-        const float sx = sign_from_bit(x_bit);
-        const float sy = sign_from_bit(y_bit);
-        const float center = scale * kInvSqrt2;
-
-        x_hat = center * sx;
-        y_hat = center * sy;
+        float local_abs_max = fabsf(values.r0);
+        local_abs_max = fmaxf(local_abs_max, fabsf(values.r1));
+        local_abs_max = fmaxf(local_abs_max, fabsf(values.r2));
+        local_abs_max = fmaxf(local_abs_max, fabsf(values.r3));
+        return local_abs_max;
     }
 
-    __device__ __forceinline__ float residual_statistic(
-        float x,
-        float y,
-        float x_hat,
-        float y_hat,
-        uint32_t code)
+    __device__ __forceinline__ LaneQuantization quantize_lane_pairs(
+        const LaneValues &values,
+        float block_scale)
     {
-        const uint32_t y_bit = code & 0x1u;
-        const uint32_t x_bit = (code >> 1) & 0x1u;
+        const uint32_t q0 = encode_quadrant_code(values.r0, values.r1);
+        const uint32_t q1 = encode_quadrant_code(values.r2, values.r3);
 
-        const float sx = sign_from_bit(x_bit);
-        const float sy = sign_from_bit(y_bit);
+        float x0_hat;
+        float y0_hat;
+        float x1_hat;
+        float y1_hat;
+        reconstruct_pair_from_code(q0, block_scale, x0_hat, y0_hat);
+        reconstruct_pair_from_code(q1, block_scale, x1_hat, y1_hat);
 
-        const float ex = x - x_hat;
-        const float ey = y - y_hat;
+        const float rho0 = residual_statistic_from_code(values.r0, values.r1, block_scale, q0);
+        const float rho1 = residual_statistic_from_code(values.r2, values.r3, block_scale, q1);
 
-        return ex * sx + ey * sy;
+        LaneQuantization result{};
+        result.quadrant_fragment = q0 | (q1 << 2);
+        result.qjl_fragment = sign_bit_from_value(rho0) | (sign_bit_from_value(rho1) << 1);
+        result.alpha_sum = fabsf(rho0) + fabsf(rho1);
+        return result;
     }
 
     static_assert(sizeof(PackedTileHeader) == 32, "PackedTileHeader must be exactly 32 bytes.");
@@ -189,47 +168,20 @@ namespace openturbo
         const int tile_base = tile_id * kTileDims;
         const int lane_base = tile_base + lane_id * kValuesPerLane;
 
-        float r0 = input[lane_base + 0];
-        float r1 = input[lane_base + 1];
-        float r2 = input[lane_base + 2];
-        float r3 = input[lane_base + 3];
+        LaneValues values = load_lane_values(input, lane_base);
+        apply_rope_to_lane(values, lane_id, token_pos, rope_theta);
+        apply_fwht_to_lane(values, lane_id);
 
-        apply_rope_pair(r0, r1, 2 * lane_id + 0, token_pos, rope_theta);
-        apply_rope_pair(r2, r3, 2 * lane_id + 1, token_pos, rope_theta);
-
-        fwht128_inplace(r0, r1, r2, r3, lane_id);
-
-        float local_abs_max = fabsf(r0);
-        local_abs_max = fmaxf(local_abs_max, fabsf(r1));
-        local_abs_max = fmaxf(local_abs_max, fabsf(r2));
-        local_abs_max = fmaxf(local_abs_max, fabsf(r3));
+        const float local_abs_max = lane_abs_max(values);
 
         float tile_abs_max = warp_reduce_max(local_abs_max);
         tile_abs_max = __shfl_sync(kWarpMask, tile_abs_max, 0);
 
         const float block_scale = tile_abs_max;
 
-        const uint32_t q0 = encode_quadrant_code(r0, r1);
-        const uint32_t q1 = encode_quadrant_code(r2, r3);
+        const LaneQuantization quantized = quantize_lane_pairs(values, block_scale);
 
-        float x0_hat, y0_hat;
-        float x1_hat, y1_hat;
-
-        reconstruct_pair_from_code(q0, block_scale, x0_hat, y0_hat);
-        reconstruct_pair_from_code(q1, block_scale, x1_hat, y1_hat);
-
-        const float rho0 = residual_statistic(r0, r1, x0_hat, y0_hat, q0);
-        const float rho1 = residual_statistic(r2, r3, x1_hat, y1_hat, q1);
-
-        const uint32_t z0 = sign_bit_from_value(rho0);
-        const uint32_t z1 = sign_bit_from_value(rho1);
-
-        const uint32_t local_quadrant_fragment = q0 | (q1 << 2);
-        const uint32_t local_qjl_fragment = z0 | (z1 << 1);
-
-        const float local_alpha_sum = fabsf(rho0) + fabsf(rho1);
-
-        float alpha_sum_tile = warp_reduce_sum(local_alpha_sum);
+        float alpha_sum_tile = warp_reduce_sum(quantized.alpha_sum);
         alpha_sum_tile = __shfl_sync(kWarpMask, alpha_sum_tile, 0);
 
         const float local_alpha = alpha_sum_tile * (1.0f / 64.0f);
@@ -239,20 +191,23 @@ namespace openturbo
         const __half local_alpha_fp16 = __float2half(local_alpha);
 
         const uint64_t scalar_word = pack_scalar_word(block_scale_fp16, local_alpha_fp16);
+        const uint64_t quadrant_word_0 = pack_quadrant_word_from_16_lanes(quantized.quadrant_fragment, 0);
+        const uint64_t quadrant_word_1 = pack_quadrant_word_from_16_lanes(quantized.quadrant_fragment, 16);
+        const uint64_t qjl_sign_word = pack_qjl_word_from_32_lanes(quantized.qjl_fragment);
 
         uint64_t packed_word = 0ull;
 
         if (lane_id == 0)
         {
-            packed_word = pack_quadrant_word_from_16_lanes(local_quadrant_fragment, 0);
+            packed_word = quadrant_word_0;
         }
         else if (lane_id == 1)
         {
-            packed_word = pack_quadrant_word_from_16_lanes(local_quadrant_fragment, 16);
+            packed_word = quadrant_word_1;
         }
         else if (lane_id == 2)
         {
-            packed_word = pack_qjl_word_from_32_lanes(local_qjl_fragment);
+            packed_word = qjl_sign_word;
         }
         else if (lane_id == 3)
         {

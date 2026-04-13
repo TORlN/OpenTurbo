@@ -22,3 +22,8 @@ ENV/
 
 # OS files
 .DS_Store
+
+# executables
+*.exe
+*.exp
+*.lib
