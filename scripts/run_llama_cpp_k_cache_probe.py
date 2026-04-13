@@ -10,6 +10,7 @@ import urllib.request
 from pathlib import Path
 
 from scaffold_llama_cpp_integration import apply_probe_patch
+from scaffold_llama_cpp_integration import apply_shadow_encode_patch
 from scaffold_llama_cpp_integration import ensure_llama_root_exists
 from scaffold_llama_cpp_integration import resolve_output_root
 from scaffold_llama_cpp_integration import resolve_llama_root
@@ -19,11 +20,14 @@ from scaffold_llama_cpp_integration import BRIDGE_HEADER
 from scaffold_llama_cpp_integration import BRIDGE_README
 from scaffold_llama_cpp_integration import CMAKE_FRAGMENT
 from scaffold_llama_cpp_integration import DEFAULT_LLAMA_CPP_URL
+from scaffold_llama_cpp_integration import SHADOW_CALLBACK_CPP
+from scaffold_llama_cpp_integration import SHADOW_CALLBACK_HEADER
 
 
 DEFAULT_HF_REPO = "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"
 DEFAULT_HF_FILE = "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
 PROBE_PATTERN = re.compile(r"^\[openturbo\] cpy_k probe .*$", re.MULTILINE)
+SHADOW_PATTERN = re.compile(r"^\[openturbo\] shadow_encode .*$", re.MULTILINE)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -146,11 +150,21 @@ def resolve_cmake_executable(explicit_cmake: Path | None) -> str:
     raise FileNotFoundError("Could not find 'cmake' on PATH. Pass --cmake with an explicit executable path.")
 
 
+def refresh_openturbo_bindings(openturbo_root: Path) -> None:
+    install_script = openturbo_root / "scripts" / "install_cuda_bindings.bat"
+    if not install_script.exists():
+        raise FileNotFoundError(f"Could not find OpenTurbo install script: {install_script}")
+
+    run_command(["cmd", "/c", str(install_script)], cwd=openturbo_root)
+
+
 def generate_scaffold(output_root: Path, force: bool) -> None:
     write_text_file(output_root / "openturbo_llama_cpp_bridge.hpp", BRIDGE_HEADER, force)
     write_text_file(output_root / "openturbo_llama_cpp_bridge.cpp", BRIDGE_CPP, force)
     write_text_file(output_root / "README.md", BRIDGE_README, force)
     write_text_file(output_root / "CMakeLists.fragment.txt", CMAKE_FRAGMENT, force)
+    write_text_file(output_root / "openturbo_shadow_eval_callback.hpp", SHADOW_CALLBACK_HEADER, force)
+    write_text_file(output_root / "openturbo_shadow_eval_callback.cpp", SHADOW_CALLBACK_CPP, force)
 
 
 def configure_probe_build(cmake_exe: str, llama_root: Path, build_dir: Path, config: str, openturbo_root: Path) -> None:
@@ -162,6 +176,7 @@ def configure_probe_build(cmake_exe: str, llama_root: Path, build_dir: Path, con
             "-B",
             str(build_dir),
             f"-DOPENTURBO_EXPERIMENTAL_K_CACHE_PROBE=ON",
+            f"-DOPENTURBO_EXPERIMENTAL_K_CACHE_SHADOW_ENCODE=ON",
             f"-DOPENTURBO_ROOT={openturbo_root}",
         ]
     )
@@ -190,7 +205,7 @@ def resolve_runner(build_dir: Path, config: str, target: str) -> Path:
     return build_dir / "bin" / config / exe_name
 
 
-def run_probe(runner: Path, model_path: Path, prompt: str, seed: str, ngl: str) -> str:
+def run_probe(runner: Path, model_path: Path, prompt: str, seed: str, ngl: str) -> tuple[str, str]:
     command = [str(runner)]
     command.extend(["-m", str(model_path)])
     command.extend(
@@ -211,14 +226,20 @@ def run_probe(runner: Path, model_path: Path, prompt: str, seed: str, ngl: str) 
     )
 
     output = (completed.stdout or "") + (completed.stderr or "")
-    match = PROBE_PATTERN.search(output)
-    if match is None:
+    probe_match = PROBE_PATTERN.search(output)
+    shadow_match = SHADOW_PATTERN.search(output)
+    if probe_match is None:
         raise RuntimeError(
             "Probe run completed without an OpenTurbo cpy_k probe line. "
             f"Exit code was {completed.returncode}."
         )
+    if shadow_match is None:
+        raise RuntimeError(
+            "Probe run completed without an OpenTurbo shadow_encode line. "
+            f"Exit code was {completed.returncode}."
+        )
 
-    return match.group(0)
+    return probe_match.group(0), shadow_match.group(0)
 
 
 def main() -> int:
@@ -227,6 +248,7 @@ def main() -> int:
     repo_root = Path(__file__).resolve().parent.parent
     cmake_exe = resolve_cmake_executable(args.cmake)
     openturbo_root = (args.openturbo_root or repo_root).resolve()
+    refresh_openturbo_bindings(openturbo_root)
 
     llama_root = resolve_llama_root(args)
     if llama_root is None:
@@ -237,6 +259,7 @@ def main() -> int:
 
     generate_scaffold(output_root, not args.no_force)
     apply_probe_patch(llama_root, output_root)
+    apply_shadow_encode_patch(llama_root, output_root)
     configure_probe_build(cmake_exe, llama_root, build_dir, args.config, openturbo_root)
     build_probe_target(cmake_exe, build_dir, args.config, args.target)
     runner = resolve_runner(build_dir, args.config, args.target)
@@ -247,7 +270,7 @@ def main() -> int:
         model_path = download_hf_model(args.hf_repo, args.hf_file, download_dir)
 
     print(f"Running probe with model {model_path}", flush=True)
-    probe_line = run_probe(runner, model_path, args.prompt, args.seed, args.ngl)
+    probe_line, shadow_line = run_probe(runner, model_path, args.prompt, args.seed, args.ngl)
 
     print(f"llama_root={llama_root}")
     print(f"build_dir={build_dir}")
@@ -255,6 +278,7 @@ def main() -> int:
     print(f"hf_repo={args.hf_repo}")
     print(f"hf_file={args.hf_file}")
     print(probe_line)
+    print(shadow_line)
     return 0
 
 

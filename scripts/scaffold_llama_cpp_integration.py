@@ -221,6 +221,225 @@ CMAKE_FRAGMENT = """# Add this source inside the downstream llama.cpp build afte
 """
 
 
+SHADOW_CALLBACK_HEADER = """#pragma once
+
+#include \"ggml-backend.h\"
+
+struct openturbo_shadow_eval_callback_state {
+    bool logged_once = false;
+    bool logged_error = false;
+};
+
+bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user_data);
+"""
+
+
+SHADOW_CALLBACK_CPP = """#include \"openturbo_shadow_eval_callback.hpp\"
+
+#include \"ggml.h\"
+#include \"openturbo/c_api.h\"
+
+#include <cuda_runtime.h>
+
+#include <cstdio>
+#include <cstring>
+#include <vector>
+
+namespace {
+bool openturbo_is_shadow_candidate(const ggml_tensor * tensor) {
+    if (tensor == nullptr || tensor->op != GGML_OP_SET_ROWS) {
+        return false;
+    }
+
+    const ggml_tensor * src_values = tensor->src[0];
+    const ggml_tensor * dst_cache = tensor->src[2];
+    if (src_values == nullptr || dst_cache == nullptr) {
+        return false;
+    }
+
+    const char * cache_name = ggml_get_name(dst_cache);
+    if (cache_name == nullptr || std::strncmp(cache_name, \"cache_k_l\", 8) != 0) {
+        return false;
+    }
+
+    return src_values->type == GGML_TYPE_F32 &&
+           src_values->ne[0] > 0 &&
+           (src_values->ne[0] % OPENTURBO_TILE_DIMS) == 0 &&
+           ggml_row_size(src_values->type, src_values->ne[0]) == src_values->nb[1];
+}
+
+bool openturbo_copy_tensor_bytes(const ggml_tensor * tensor, std::vector<unsigned char> & bytes) {
+    const size_t nbytes = ggml_nbytes(tensor);
+    bytes.resize(nbytes);
+
+    if (tensor->buffer != nullptr && ggml_backend_buffer_is_host(tensor->buffer)) {
+        std::memcpy(bytes.data(), tensor->data, nbytes);
+        return true;
+    }
+
+    ggml_backend_tensor_get(tensor, bytes.data(), 0, nbytes);
+    return true;
+}
+
+long long openturbo_first_row_index(const ggml_tensor * tensor) {
+    if (tensor == nullptr || ggml_nelements(tensor) <= 0) {
+        return -1;
+    }
+
+    if (tensor->type == GGML_TYPE_I32) {
+        int32_t value = 0;
+        if (tensor->buffer != nullptr && ggml_backend_buffer_is_host(tensor->buffer)) {
+            std::memcpy(&value, tensor->data, sizeof(value));
+        } else {
+            ggml_backend_tensor_get(tensor, &value, 0, sizeof(value));
+        }
+        return value;
+    }
+
+    if (tensor->type == GGML_TYPE_I64) {
+        int64_t value = 0;
+        if (tensor->buffer != nullptr && ggml_backend_buffer_is_host(tensor->buffer)) {
+            std::memcpy(&value, tensor->data, sizeof(value));
+        } else {
+            ggml_backend_tensor_get(tensor, &value, 0, sizeof(value));
+        }
+        return static_cast<long long>(value);
+    }
+
+    return -1;
+}
+
+int openturbo_parse_layer_index(const ggml_tensor * tensor) {
+    if (tensor == nullptr) {
+        return -1;
+    }
+
+    const char * cache_name = ggml_get_name(tensor);
+    if (cache_name == nullptr) {
+        return -1;
+    }
+
+    int layer_index = -1;
+    std::sscanf(cache_name, \"cache_k_l%d\", &layer_index);
+    return layer_index;
+}
+}
+
+bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user_data) {
+    auto * state = static_cast<openturbo_shadow_eval_callback_state *>(user_data);
+
+    if (ask) {
+        return state == nullptr ? openturbo_is_shadow_candidate(tensor)
+                                : (!state->logged_once && openturbo_is_shadow_candidate(tensor));
+    }
+
+    if (!openturbo_is_shadow_candidate(tensor)) {
+        return true;
+    }
+
+    if (state != nullptr && state->logged_once) {
+        return true;
+    }
+
+    const ggml_tensor * src_values = tensor->src[0];
+    const ggml_tensor * src_indices = tensor->src[1];
+    const ggml_tensor * dst_cache = tensor->src[2];
+
+    const int64_t total_elements = ggml_nelements(src_values);
+    const int num_tiles = static_cast<int>(total_elements / OPENTURBO_TILE_DIMS);
+    if (num_tiles <= 0) {
+        return true;
+    }
+
+    int device_count = 0;
+    cudaError_t cuda_status = cudaGetDeviceCount(&device_count);
+    if (cuda_status != cudaSuccess || device_count <= 0) {
+        if (state == nullptr || !state->logged_error) {
+            std::fprintf(stderr,
+                         \"[openturbo] shadow_encode layer=%d status=skipped reason=no_cuda_device cuda=%d\\n\",
+                         openturbo_parse_layer_index(dst_cache),
+                         static_cast<int>(cuda_status));
+            if (state != nullptr) {
+                state->logged_error = true;
+            }
+        }
+        return true;
+    }
+
+    std::vector<unsigned char> host_input_bytes;
+    openturbo_copy_tensor_bytes(src_values, host_input_bytes);
+
+    float * device_input = nullptr;
+    openturbo_packed_tile_header_t * device_headers = nullptr;
+    openturbo_packed_tile_header_t first_header{};
+
+    cuda_status = cudaMalloc(&device_input, host_input_bytes.size());
+    if (cuda_status != cudaSuccess) {
+        std::fprintf(stderr,
+                     \"[openturbo] shadow_encode layer=%d status=cuda_alloc_failed cuda=%d\\n\",
+                     openturbo_parse_layer_index(dst_cache),
+                     static_cast<int>(cuda_status));
+        if (state != nullptr) {
+            state->logged_error = true;
+        }
+        return true;
+    }
+
+    cuda_status = cudaMalloc(&device_headers, sizeof(openturbo_packed_tile_header_t) * static_cast<size_t>(num_tiles));
+    if (cuda_status == cudaSuccess) {
+        cuda_status = cudaMemcpy(device_input, host_input_bytes.data(), host_input_bytes.size(), cudaMemcpyHostToDevice);
+    }
+
+    int openturbo_cuda_status = 0;
+    openturbo_status_t status = OPENTURBO_STATUS_CUDA_ERROR;
+    if (cuda_status == cudaSuccess) {
+        status = openturbo_encode_tile_fused_prerotated(
+            device_input,
+            device_headers,
+            num_tiles,
+            nullptr,
+            &openturbo_cuda_status);
+    }
+
+    if (status == OPENTURBO_STATUS_SUCCESS) {
+        cuda_status = cudaMemcpy(&first_header, device_headers, sizeof(first_header), cudaMemcpyDeviceToHost);
+    }
+
+    if (device_headers != nullptr) {
+        cudaFree(device_headers);
+    }
+    if (device_input != nullptr) {
+        cudaFree(device_input);
+    }
+
+    if (status == OPENTURBO_STATUS_SUCCESS && cuda_status == cudaSuccess) {
+        std::fprintf(stderr,
+                     \"[openturbo] shadow_encode layer=%d status=success num_tiles=%d first_row=%lld cache=%s first_qword0=%llu\\n\",
+                     openturbo_parse_layer_index(dst_cache),
+                     num_tiles,
+                     openturbo_first_row_index(src_indices),
+                     ggml_get_name(dst_cache),
+                     static_cast<unsigned long long>(first_header.quadrant_word_0));
+        if (state != nullptr) {
+            state->logged_once = true;
+        }
+        return true;
+    }
+
+    std::fprintf(stderr,
+                 \"[openturbo] shadow_encode layer=%d status=failed openturbo=%d cuda=%d detail=%s\\n\",
+                 openturbo_parse_layer_index(dst_cache),
+                 static_cast<int>(status),
+                 status == OPENTURBO_STATUS_SUCCESS ? static_cast<int>(cuda_status) : openturbo_cuda_status,
+                 status == OPENTURBO_STATUS_SUCCESS ? cudaGetErrorString(cuda_status) : openturbo_status_string(status));
+    if (state != nullptr) {
+        state->logged_error = true;
+    }
+    return true;
+}
+"""
+
+
 PROBE_OPTION_BLOCK = """option(OPENTURBO_EXPERIMENTAL_K_CACHE_PROBE \"llama: enable OpenTurbo K-cache probe logging\" OFF)
 set(OPENTURBO_ROOT \"\" CACHE PATH \"Path to the OpenTurbo workspace or install prefix\")
 
@@ -265,6 +484,70 @@ PROBE_CALL_BLOCK = """
 #ifdef OPENTURBO_EXPERIMENTAL_K_CACHE_PROBE
     openturbo_probe_k_cache_write(k_cur, k, il, get_size(), k->ne[2]);
 #endif
+"""
+
+
+SHADOW_EVAL_CMAKE_BLOCK = """
+if (OPENTURBO_EXPERIMENTAL_K_CACHE_SHADOW_ENCODE)
+    if (NOT OPENTURBO_ROOT)
+        get_filename_component(OPENTURBO_ROOT_CANDIDATE "${{CMAKE_CURRENT_SOURCE_DIR}}/../.." ABSOLUTE)
+        if (EXISTS "${{OPENTURBO_ROOT_CANDIDATE}}/include/openturbo/ggml_downstream.hpp")
+            set(OPENTURBO_ROOT "${{OPENTURBO_ROOT_CANDIDATE}}")
+        else()
+            message(FATAL_ERROR "OPENTURBO_EXPERIMENTAL_K_CACHE_SHADOW_ENCODE requires OPENTURBO_ROOT to point at an OpenTurbo tree or install prefix")
+        endif()
+    endif()
+
+    find_package(CUDAToolkit REQUIRED)
+    find_library(OPENTURBO_C_API_LIBRARY NAMES openturbo_c_api PATHS
+        "${{OPENTURBO_ROOT}}/.venv/Lib/site-packages/openturbo"
+        "${{OPENTURBO_ROOT}}/build"
+        NO_DEFAULT_PATH)
+    find_file(OPENTURBO_C_API_DLL NAMES openturbo_c_api.dll PATHS
+        "${{OPENTURBO_ROOT}}/.venv/Lib/site-packages/openturbo"
+        "${{OPENTURBO_ROOT}}/build"
+        NO_DEFAULT_PATH)
+
+    if (NOT OPENTURBO_C_API_LIBRARY OR NOT OPENTURBO_C_API_DLL)
+        message(FATAL_ERROR "Could not locate openturbo_c_api.lib/.dll under OPENTURBO_ROOT. Build or install OpenTurbo first.")
+    endif()
+
+    target_sources(${{TARGET}} PRIVATE {shadow_cpp_rel})
+    target_include_directories(${{TARGET}} PRIVATE {shadow_dir_rel} "${{OPENTURBO_ROOT}}/include")
+    target_link_libraries(${{TARGET}} PRIVATE "${{OPENTURBO_C_API_LIBRARY}}" CUDA::cudart)
+    target_compile_definitions(${{TARGET}} PRIVATE OPENTURBO_EXPERIMENTAL_K_CACHE_SHADOW_ENCODE)
+    add_custom_command(TARGET ${{TARGET}} POST_BUILD
+        COMMAND ${{CMAKE_COMMAND}} -E copy_if_different "${{OPENTURBO_C_API_DLL}}" "$<TARGET_FILE_DIR:${{TARGET}}>")
+endif()
+"""
+
+
+SHADOW_EVAL_INCLUDE_BLOCK = """
+#ifdef OPENTURBO_EXPERIMENTAL_K_CACHE_SHADOW_ENCODE
+#include \"openturbo_shadow_eval_callback.hpp\"
+#endif
+"""
+
+
+SHADOW_EVAL_STATE_BLOCK = """
+#ifdef OPENTURBO_EXPERIMENTAL_K_CACHE_SHADOW_ENCODE
+    openturbo_shadow_eval_callback_state cb_data;
+#else
+    base_callback_data cb_data;
+#endif
+"""
+
+
+SHADOW_EVAL_ASSIGN_BLOCK = """
+    // pass the callback to the backend scheduler
+    // it will be executed for each node during the graph computation
+#ifdef OPENTURBO_EXPERIMENTAL_K_CACHE_SHADOW_ENCODE
+    params.cb_eval = openturbo_shadow_cb_eval;
+#else
+    params.cb_eval = common_debug_cb_eval<false>;
+#endif
+    params.cb_eval_user_data = &cb_data;
+    params.warmup = false;
 """
 
 
@@ -320,6 +603,42 @@ endif()
     return changed
 
 
+def patch_shadow_eval_callback_cmakelists(example_cmakelists: Path, output_root: Path) -> bool:
+    text = example_cmakelists.read_text(encoding="utf-8")
+    shadow_cpp_rel = Path(os.path.relpath(output_root / "openturbo_shadow_eval_callback.cpp", example_cmakelists.parent)).as_posix()
+    shadow_dir_rel = Path(os.path.relpath(output_root, example_cmakelists.parent)).as_posix()
+    block = SHADOW_EVAL_CMAKE_BLOCK.format(shadow_cpp_rel=shadow_cpp_rel, shadow_dir_rel=shadow_dir_rel)
+    text, changed = patch_text_once(text, "target_compile_features(${TARGET} PRIVATE cxx_std_17)\n", block, example_cmakelists)
+    if changed:
+        example_cmakelists.write_text(text, encoding="utf-8")
+    return changed
+
+
+def patch_shadow_eval_callback_source(example_source: Path) -> bool:
+    text = example_source.read_text(encoding="utf-8")
+    changed = False
+
+    text, did_change = patch_text_once(text, '#include "llama-cpp.h"\n', SHADOW_EVAL_INCLUDE_BLOCK, example_source)
+    changed = changed or did_change
+
+    if SHADOW_EVAL_STATE_BLOCK not in text:
+        if "    base_callback_data cb_data;\n" not in text:
+            raise ValueError(f"Could not find expected callback state anchor in {example_source}")
+        text = text.replace("    base_callback_data cb_data;\n", SHADOW_EVAL_STATE_BLOCK, 1)
+        changed = True
+
+    if SHADOW_EVAL_ASSIGN_BLOCK not in text:
+        anchor = "    // pass the callback to the backend scheduler\n    // it will be executed for each node during the graph computation\n    params.cb_eval = common_debug_cb_eval<false>;\n    params.cb_eval_user_data = &cb_data;\n    params.warmup = false;\n"
+        if anchor not in text:
+            raise ValueError(f"Could not find expected callback assignment anchor in {example_source}")
+        text = text.replace(anchor, SHADOW_EVAL_ASSIGN_BLOCK, 1)
+        changed = True
+
+    if changed:
+        example_source.write_text(text, encoding="utf-8")
+    return changed
+
+
 def patch_probe_kv_cache(src_file: Path) -> bool:
     text = src_file.read_text(encoding="utf-8")
     changed = False
@@ -354,6 +673,19 @@ def apply_probe_patch(llama_root: Path, output_root: Path) -> bool:
     return changed_cmake or changed_kv
 
 
+def apply_shadow_encode_patch(llama_root: Path, output_root: Path) -> bool:
+    example_root = llama_root / "examples" / "eval-callback"
+    example_cmakelists = example_root / "CMakeLists.txt"
+    example_source = example_root / "eval-callback.cpp"
+
+    if not example_cmakelists.exists() or not example_source.exists():
+        raise FileNotFoundError("Shadow encode patch requires llama.cpp examples/eval-callback/CMakeLists.txt and eval-callback.cpp")
+
+    changed_cmake = patch_shadow_eval_callback_cmakelists(example_cmakelists, output_root)
+    changed_source = patch_shadow_eval_callback_source(example_source)
+    return changed_cmake or changed_source
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate an OpenTurbo integration scaffold inside a llama.cpp checkout.")
     parser.add_argument("llama_root", nargs="?", type=Path, help="Optional path to an existing llama.cpp checkout or a destination to clone into.")
@@ -364,6 +696,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, help="Explicit directory where scaffold files will be written. Overrides --output-subdir when provided.")
     parser.add_argument("--output-subdir", default="examples/openturbo", help="Subdirectory inside llama_root where the scaffold files will be written.")
     parser.add_argument("--probe-k-cache", action="store_true", help="Patch the downstream llama.cpp checkout with the experimental cpy_k probe flow.")
+    parser.add_argument("--shadow-encode", action="store_true", help="Patch the downstream eval-callback example with an execution-time OpenTurbo shadow encode callback.")
     parser.add_argument("--force", action="store_true", help="Overwrite existing generated files.")
     return parser
 
@@ -408,12 +741,20 @@ def main() -> int:
     write_text_file(output_root / "openturbo_llama_cpp_bridge.cpp", BRIDGE_CPP, args.force)
     write_text_file(output_root / "README.md", BRIDGE_README, args.force)
     write_text_file(output_root / "CMakeLists.fragment.txt", CMAKE_FRAGMENT, args.force)
+    write_text_file(output_root / "openturbo_shadow_eval_callback.hpp", SHADOW_CALLBACK_HEADER, args.force)
+    write_text_file(output_root / "openturbo_shadow_eval_callback.cpp", SHADOW_CALLBACK_CPP, args.force)
 
     patched_probe = False
+    patched_shadow_encode = False
     if args.probe_k_cache:
         if llama_root is None:
             raise ValueError("--probe-k-cache requires a llama_root path or --llama-root.")
         patched_probe = apply_probe_patch(llama_root, output_root)
+
+    if args.shadow_encode:
+        if llama_root is None:
+            raise ValueError("--shadow-encode requires a llama_root path or --llama-root.")
+        patched_shadow_encode = apply_shadow_encode_patch(llama_root, output_root)
 
     print(f"Generated OpenTurbo llama.cpp scaffold in: {output_root}")
     if args.probe_k_cache:
@@ -421,6 +762,11 @@ def main() -> int:
             print(f"Applied experimental K-cache probe patch in: {llama_root}")
         else:
             print(f"Experimental K-cache probe patch already present in: {llama_root}")
+    if args.shadow_encode:
+        if patched_shadow_encode:
+            print(f"Applied experimental shadow-encode patch in: {llama_root}")
+        else:
+            print(f"Experimental shadow-encode patch already present in: {llama_root}")
     return 0
 
 
