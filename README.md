@@ -47,3 +47,19 @@ OPENTURBO/
 ├── kernels/             # (TBP) Custom CUDA source (.cu / .cuh)
 ├── pyproject.toml       # Build system requirements
 └── README.md            # You are here
+```
+
+## Building The Python CUDA Extension
+
+The project now includes a native-extension build path for the `_openturbo_cuda`
+module using CMake + scikit-build-core.
+
+```powershell
+scripts\install_cuda_bindings.bat
+```
+
+On this workspace, the build assumes:
+
+* CUDA Toolkit is installed and available at the standard Windows location.
+* Visual Studio 2022 Build Tools are available for 64-bit host builds.
+* The target architecture is RTX 4090 (`sm_89`) unless overridden with `CMAKE_CUDA_ARCHITECTURES`.

@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
 
 [project]
 name = "openturbo"
@@ -18,5 +18,14 @@ Homepage = "https://example.com"
 [project.optional-dependencies]
 bindings = ["pybind11>=2.12"]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.scikit-build]
+wheel.packages = ["src/openturbo"]
+cmake.build-type = "Release"
+editable.mode = "redirect"
+
+[tool.scikit-build.cmake.define]
+CMAKE_CUDA_ARCHITECTURES = "89"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+

@@ -1,12 +1,38 @@
-"""Python-facing wrappers for the future CUDA extension.
+"""Python-facing wrappers for the CUDA extension.
 
 This module defines the stable Python contract around the raw-pointer launch
-wrappers exposed by the compiled `_openturbo_cuda` extension. The extension is
-optional during early development; these helpers fail with a clear error when
-the binary module has not been built yet.
+wrappers exposed by the compiled `_openturbo_cuda` extension. The extension may
+still be unavailable during early development; these helpers fail with a clear
+error when the binary module has not been built yet.
 """
 
+import os
+from pathlib import Path
 from typing import Any, Optional
+
+
+def _configure_windows_dll_search() -> None:
+    if os.name != "nt":
+        return
+
+    candidates = []
+    cuda_path = os.environ.get("CUDA_PATH")
+    if cuda_path:
+        candidates.append(Path(cuda_path) / "bin")
+
+    candidates.append(Path("C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/bin"))
+
+    for directory in candidates:
+        if not directory.is_dir():
+            continue
+
+        try:
+            os.add_dll_directory(str(directory))
+        except (AttributeError, FileNotFoundError, OSError):
+            continue
+
+
+_configure_windows_dll_search()
 
 try:
     from . import _openturbo_cuda as _native
