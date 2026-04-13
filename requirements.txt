@@ -1,4 +1,2 @@
-# Put runtime requirements here, one per line
-
-# Dev/test requirements
-pytest
+# CI and local test dependencies for the non-CUDA validation path.
+pytest>=8

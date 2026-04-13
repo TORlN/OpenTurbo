@@ -207,10 +207,11 @@ That single script will:
 
 1. Bootstrap or reuse a local llama.cpp checkout.
 2. Generate the OpenTurbo scaffold.
-3. Apply the experimental `cpy_k()` probe patch.
-4. Configure and build a probe-enabled downstream tree.
-5. Download the tiny `stories15M-q4_0.gguf` model.
-6. Run `llama-eval-callback` and print the one-line OpenTurbo probe result.
+3. Apply the experimental `cpy_k()` probe patch and the eval-callback shadow encode patch.
+4. Refresh the local OpenTurbo editable install so the downstream build links against the current native library.
+5. Configure and build a probe-enabled downstream tree.
+6. Download the default `Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf` model.
+7. Run `llama-eval-callback` and print the `cpy_k probe`, `shadow_encode`, and `shadow_read` result lines.
 
 If you run the script with no arguments, it will create a local `llama` directory in the current working directory and write the scaffold there:
 
@@ -248,12 +249,36 @@ If you want the scaffold plus the automated downstream `cpy_k()` probe patch exp
 
 That patch adds an `OPENTURBO_EXPERIMENTAL_K_CACHE_PROBE` CMake option to the downstream checkout and instruments `llama_kv_cache::cpy_k()` to emit a one-time tensor-layout log line during inference.
 
+If you also want the execution-time shadow encode and sidecar read probe patch in the downstream eval-callback example:
+
+```powershell
+.venv\Scripts\python.exe scripts\scaffold_llama_cpp_integration.py --bootstrap --probe-k-cache --shadow-encode
+```
+
+That patch set does two additional things during downstream execution:
+
+1. `shadow_encode`: runs the pre-rotated OpenTurbo encoder on executed `GGML_OP_SET_ROWS` K-cache writes and stores the packed headers in a per-layer sidecar keyed by cache row index.
+2. `shadow_read`: observes the first executed non-`SET_ROWS` node whose source chain reaches `cache_k_l*` and reports how much of the requested K-read window is currently covered by the sidecar.
+
+At the current stage this read-side result is expected to be coverage-oriented, not a full attention replacement. On the current llama.cpp graph the read probe can report `partial` because the graph reuses a padded K-cache view that extends beyond rows written in the current step.
+
+## Current Validation
+
+The repo is currently validated at three levels:
+
+* Python tests via `pytest`, including scaffold generation, downstream patch idempotency, and probe-output parsing.
+* Native CUDA smoke coverage via `build\c_api_smoke_test.exe`.
+* Downstream llama.cpp execution via `scripts\run_llama_cpp_k_cache_probe.py`, which now requires all three runtime lines:
+	* `cpy_k probe`
+	* `shadow_encode`
+	* `shadow_read`
+
 The generated files are intentionally small and explicit. They wrap real `ggml_tensor` objects through `include/openturbo/ggml_downstream.hpp`, but you still need to connect them to the actual llama.cpp call site that owns the K/V cache tensors.
 
 ## Next Work
 
 Likely next engineering steps are:
 
-1. Wire the generated scaffold and `include/openturbo/ggml_downstream.hpp` into an actual llama.cpp integration point that owns real `ggml_tensor` KV caches.
-2. Extend the shim from all-head dispatch to sequence-aware integration flows that handle multiple tokens per launch site.
-3. Add model-level validation and profiler-driven performance work once the downstream bridge is exercised in a real model path.
+1. Replace the current prefix-based read coverage check with exact active-row tracking from the downstream K-read path.
+2. Turn the sidecar read probe into a first score-path experiment that consumes packed metadata for the active rows only.
+3. Add model-level validation and profiler-driven performance work once the downstream bridge starts influencing attention results.

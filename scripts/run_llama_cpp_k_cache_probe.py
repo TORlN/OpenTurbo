@@ -28,6 +28,7 @@ DEFAULT_HF_REPO = "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"
 DEFAULT_HF_FILE = "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
 PROBE_PATTERN = re.compile(r"^\[openturbo\] cpy_k probe .*$", re.MULTILINE)
 SHADOW_PATTERN = re.compile(r"^\[openturbo\] shadow_encode .*$", re.MULTILINE)
+SHADOW_READ_PATTERN = re.compile(r"^\[openturbo\] shadow_read .*$", re.MULTILINE)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -205,9 +206,10 @@ def resolve_runner(build_dir: Path, config: str, target: str) -> Path:
     return build_dir / "bin" / config / exe_name
 
 
-def parse_probe_output(output: str, returncode: int) -> tuple[str, str]:
+def parse_probe_output(output: str, returncode: int) -> tuple[str, str, str]:
     probe_match = PROBE_PATTERN.search(output)
     shadow_match = SHADOW_PATTERN.search(output)
+    shadow_read_match = SHADOW_READ_PATTERN.search(output)
     if probe_match is None:
         raise RuntimeError(
             "Probe run completed without an OpenTurbo cpy_k probe line. "
@@ -218,11 +220,16 @@ def parse_probe_output(output: str, returncode: int) -> tuple[str, str]:
             "Probe run completed without an OpenTurbo shadow_encode line. "
             f"Exit code was {returncode}."
         )
+    if shadow_read_match is None:
+        raise RuntimeError(
+            "Probe run completed without an OpenTurbo shadow_read line. "
+            f"Exit code was {returncode}."
+        )
 
-    return probe_match.group(0), shadow_match.group(0)
+    return probe_match.group(0), shadow_match.group(0), shadow_read_match.group(0)
 
 
-def run_probe(runner: Path, model_path: Path, prompt: str, seed: str, ngl: str) -> tuple[str, str]:
+def run_probe(runner: Path, model_path: Path, prompt: str, seed: str, ngl: str) -> tuple[str, str, str]:
     command = [str(runner)]
     command.extend(["-m", str(model_path)])
     command.extend(
@@ -274,7 +281,7 @@ def main() -> int:
         model_path = download_hf_model(args.hf_repo, args.hf_file, download_dir)
 
     print(f"Running probe with model {model_path}", flush=True)
-    probe_line, shadow_line = run_probe(runner, model_path, args.prompt, args.seed, args.ngl)
+    probe_line, shadow_line, shadow_read_line = run_probe(runner, model_path, args.prompt, args.seed, args.ngl)
 
     print(f"llama_root={llama_root}")
     print(f"build_dir={build_dir}")
@@ -283,6 +290,7 @@ def main() -> int:
     print(f"hf_file={args.hf_file}")
     print(probe_line)
     print(shadow_line)
+    print(shadow_read_line)
     return 0
 
 

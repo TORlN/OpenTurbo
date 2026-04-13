@@ -226,7 +226,8 @@ SHADOW_CALLBACK_HEADER = """#pragma once
 #include \"ggml-backend.h\"
 
 struct openturbo_shadow_eval_callback_state {
-    bool logged_once = false;
+    bool logged_write_once = false;
+    bool logged_read_once = false;
     bool logged_error = false;
 };
 
@@ -418,21 +419,118 @@ int openturbo_store_sidecar_rows(openturbo_shadow_layer_sidecar & sidecar,
 
     return stored_rows;
 }
+
+const ggml_tensor * openturbo_find_named_cache_tensor(const ggml_tensor * tensor, int depth_remaining = 8) {
+    if (tensor == nullptr || depth_remaining < 0) {
+        return nullptr;
+    }
+
+    const char * tensor_name = ggml_get_name(tensor);
+    if (tensor_name != nullptr && std::strncmp(tensor_name, "cache_k_l", 8) == 0) {
+        return tensor;
+    }
+
+    for (int source_index = 0; source_index < GGML_MAX_SRC; ++source_index) {
+        const ggml_tensor * source = tensor->src[source_index];
+        if (source == nullptr) {
+            continue;
+        }
+
+        if (const ggml_tensor * found = openturbo_find_named_cache_tensor(source, depth_remaining - 1)) {
+            return found;
+        }
+    }
+
+    return nullptr;
+}
+
+bool openturbo_is_read_candidate(const ggml_tensor * tensor) {
+    if (tensor == nullptr) {
+        return false;
+    }
+
+    if (tensor->op == GGML_OP_SET_ROWS) {
+        return false;
+    }
+
+    return openturbo_find_named_cache_tensor(tensor) != nullptr;
+}
+
+int64_t openturbo_expected_read_rows(const ggml_tensor * tensor) {
+    if (tensor == nullptr) {
+        return 0;
+    }
+
+    if (tensor->ne[2] > 0) {
+        return tensor->ne[2] * std::max<int64_t>(tensor->ne[3], 1);
+    }
+
+    return std::max<int64_t>(tensor->ne[1], 0);
+}
+
+int openturbo_count_present_prefix_rows(const openturbo_shadow_layer_sidecar & sidecar, int64_t prefix_rows) {
+    const int64_t bounded_rows = std::min<int64_t>(prefix_rows, sidecar.row_capacity);
+    int present_rows = 0;
+    for (int64_t row = 0; row < bounded_rows; ++row) {
+        present_rows += sidecar.present_rows[static_cast<size_t>(row)] != 0 ? 1 : 0;
+    }
+    return present_rows;
+}
 }
 
 bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user_data) {
     auto * state = static_cast<openturbo_shadow_eval_callback_state *>(user_data);
 
     if (ask) {
-        return state == nullptr ? openturbo_is_shadow_candidate(tensor)
-                                : (!state->logged_once && openturbo_is_shadow_candidate(tensor));
+        const bool wants_write = openturbo_is_shadow_candidate(tensor) && (state == nullptr || !state->logged_write_once);
+        const bool wants_read = openturbo_is_read_candidate(tensor) && (state == nullptr || !state->logged_read_once);
+        return wants_write || wants_read;
+    }
+
+    if (openturbo_is_read_candidate(tensor)) {
+        if (state != nullptr && state->logged_read_once) {
+            return true;
+        }
+
+        const ggml_tensor * cache_tensor = openturbo_find_named_cache_tensor(tensor);
+        const int layer_index = openturbo_parse_layer_index(cache_tensor);
+        const auto sidecar_it = g_openturbo_shadow_sidecars.find(layer_index);
+        if (sidecar_it == g_openturbo_shadow_sidecars.end()) {
+            std::fprintf(stderr,
+                         \"[openturbo] shadow_read layer=%d status=missing_sidecar node=%s\\n\",
+                         layer_index,
+                         ggml_get_name(tensor));
+            if (state != nullptr) {
+                state->logged_read_once = true;
+                state->logged_error = true;
+            }
+            return true;
+        }
+
+        const auto & sidecar = sidecar_it->second;
+        const int64_t expected_rows = openturbo_expected_read_rows(cache_tensor);
+        const int64_t bounded_rows = std::min<int64_t>(expected_rows, sidecar.row_capacity);
+        const int present_rows = openturbo_count_present_prefix_rows(sidecar, expected_rows);
+
+        std::fprintf(stderr,
+                     \"[openturbo] shadow_read layer=%d status=%s node=%s expected_rows=%lld present_rows=%d tiles_per_row=%lld\\n\",
+                     layer_index,
+                     present_rows == bounded_rows ? "success" : "partial",
+                     ggml_get_name(tensor),
+                     static_cast<long long>(expected_rows),
+                     present_rows,
+                     static_cast<long long>(sidecar.tiles_per_row));
+        if (state != nullptr) {
+            state->logged_read_once = true;
+        }
+        return true;
     }
 
     if (!openturbo_is_shadow_candidate(tensor)) {
         return true;
     }
 
-    if (state != nullptr && state->logged_once) {
+    if (state != nullptr && state->logged_write_once) {
         return true;
     }
 
@@ -560,7 +658,7 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
                      ggml_get_name(dst_cache),
                      static_cast<unsigned long long>(first_header.quadrant_word_0));
         if (state != nullptr) {
-            state->logged_once = true;
+            state->logged_write_once = true;
         }
         return true;
     }

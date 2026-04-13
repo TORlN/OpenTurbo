@@ -144,18 +144,32 @@ def test_parse_probe_output_requires_both_lines() -> None:
         [
             "[openturbo] cpy_k probe layer=0 compatible=1 head_dim=128",
             "[openturbo] shadow_encode layer=0 status=success num_tiles=16",
+            "[openturbo] shadow_read layer=0 status=success node=kq-0 expected_rows=1 present_rows=1 tiles_per_row=8",
         ]
     )
 
-    probe_line, shadow_line = probe_runner.parse_probe_output(output, 0)
+    probe_line, shadow_line, shadow_read_line = probe_runner.parse_probe_output(output, 0)
 
     assert probe_line.startswith("[openturbo] cpy_k probe")
     assert shadow_line.startswith("[openturbo] shadow_encode")
+    assert shadow_read_line.startswith("[openturbo] shadow_read")
 
 
 def test_parse_probe_output_rejects_missing_shadow_line() -> None:
     with pytest.raises(RuntimeError, match="shadow_encode"):
         probe_runner.parse_probe_output("[openturbo] cpy_k probe layer=0 compatible=1", 0)
+
+
+def test_parse_probe_output_rejects_missing_shadow_read_line() -> None:
+    output = "\n".join(
+        [
+            "[openturbo] cpy_k probe layer=0 compatible=1 head_dim=128",
+            "[openturbo] shadow_encode layer=0 status=success num_tiles=16",
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="shadow_read"):
+        probe_runner.parse_probe_output(output, 0)
 
 
 def test_write_text_file_refuses_overwrite_without_force(tmp_path: Path) -> None:
