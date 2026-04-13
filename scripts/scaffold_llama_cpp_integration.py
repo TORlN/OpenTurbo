@@ -529,6 +529,12 @@ struct openturbo_shadow_score_summary {
     float top_score = 0.0f;
     int64_t first_row = -1;
     float first_score = 0.0f;
+    int64_t dense_top_row = -1;
+    float dense_top_score = 0.0f;
+    float dense_first_score = 0.0f;
+    float mean_abs_error = 0.0f;
+    float max_abs_error = 0.0f;
+    int top_match = 0;
 };
 
 openturbo_shadow_read_coverage openturbo_compute_mask_read_coverage(
@@ -676,12 +682,62 @@ bool openturbo_copy_query_block_f32(const ggml_tensor * tensor,
     return false;
 }
 
+bool openturbo_copy_k_head_row_f32(const ggml_tensor * tensor,
+                                   int64_t             local_row,
+                                   int                 head_index,
+                                   std::vector<float> & row_values) {
+    row_values.clear();
+    if (tensor == nullptr || tensor->ne[0] <= 0 || tensor->ne[1] <= local_row || local_row < 0 ||
+        tensor->ne[2] <= head_index || head_index < 0 || tensor->ne[3] != 1) {
+        return false;
+    }
+
+    const int64_t head_dim = tensor->ne[0];
+    row_values.resize(static_cast<size_t>(head_dim));
+    const size_t base_offset = static_cast<size_t>(local_row) * static_cast<size_t>(tensor->nb[1]) +
+                               static_cast<size_t>(head_index) * static_cast<size_t>(tensor->nb[2]);
+
+    if (tensor->type == GGML_TYPE_F32 && tensor->nb[0] == sizeof(float)) {
+        if (tensor->buffer != nullptr && ggml_backend_buffer_is_host(tensor->buffer)) {
+            std::memcpy(row_values.data(), static_cast<const char *>(tensor->data) + base_offset, sizeof(float) * static_cast<size_t>(head_dim));
+        } else {
+            ggml_backend_tensor_get(tensor, row_values.data(), base_offset, sizeof(float) * static_cast<size_t>(head_dim));
+        }
+        return true;
+    }
+
+    if (tensor->type == GGML_TYPE_F16 && tensor->nb[0] == sizeof(ggml_fp16_t)) {
+        std::vector<ggml_fp16_t> raw(static_cast<size_t>(head_dim));
+        if (tensor->buffer != nullptr && ggml_backend_buffer_is_host(tensor->buffer)) {
+            std::memcpy(raw.data(), static_cast<const char *>(tensor->data) + base_offset, sizeof(ggml_fp16_t) * static_cast<size_t>(head_dim));
+        } else {
+            ggml_backend_tensor_get(tensor, raw.data(), base_offset, sizeof(ggml_fp16_t) * static_cast<size_t>(head_dim));
+        }
+
+        for (size_t value_index = 0; value_index < raw.size(); ++value_index) {
+            row_values[value_index] = ggml_fp16_to_fp32(raw[value_index]);
+        }
+        return true;
+    }
+
+    return false;
+}
+
+float openturbo_dense_dot(const float * lhs, const float * rhs, int64_t count) {
+    float total = 0.0f;
+    for (int64_t index = 0; index < count; ++index) {
+        total += lhs[index] * rhs[index];
+    }
+    return total;
+}
+
 openturbo_shadow_score_summary openturbo_run_shadow_score(const ggml_tensor *                    q_tensor,
+                                                          const ggml_tensor *                    k_tensor,
                                                           const ggml_tensor *                    cache_tensor,
                                                           const ggml_tensor *                    mask_tensor,
                                                           const openturbo_shadow_layer_sidecar & sidecar) {
     openturbo_shadow_score_summary summary;
-    if (q_tensor == nullptr || cache_tensor == nullptr || mask_tensor == nullptr) {
+    if (q_tensor == nullptr || k_tensor == nullptr || cache_tensor == nullptr || mask_tensor == nullptr) {
         summary.reason = "missing_tensor";
         return summary;
     }
@@ -829,22 +885,55 @@ openturbo_shadow_score_summary openturbo_run_shadow_score(const ggml_tensor *   
         summary.first_row = active_rows.front();
 
         float best_score = -INFINITY;
+        float best_dense_score = -INFINITY;
+        float total_abs_error = 0.0f;
+        const int64_t rows_per_stream = openturbo_rows_per_stream(cache_tensor);
+        const int64_t stream_base_index = openturbo_stream_base_index(cache_tensor);
+        const int64_t local_row_base = stream_base_index * rows_per_stream;
+        std::vector<float> dense_scores(active_rows.size(), 0.0f);
+        std::vector<float> k_row_values;
         for (size_t active_index = 0; active_index < active_rows.size(); ++active_index) {
             float mean_score = 0.0f;
+            float mean_dense_score = 0.0f;
+            const int64_t local_row = active_rows[active_index] - local_row_base;
             for (int head_index = 0; head_index < num_heads; ++head_index) {
-                mean_score += host_scores[static_cast<size_t>(head_index) * active_rows.size() + active_index];
+                const size_t score_offset = static_cast<size_t>(head_index) * active_rows.size() + active_index;
+                mean_score += host_scores[score_offset];
+
+                if (!openturbo_copy_k_head_row_f32(k_tensor, local_row, head_index, k_row_values)) {
+                    summary.reason = "unsupported_k_layout";
+                    summary.success = false;
+                    goto cleanup;
+                }
+
+                const float * const query_head = query_values.data() + static_cast<size_t>(head_index) * static_cast<size_t>(head_dim);
+                mean_dense_score += openturbo_dense_dot(query_head, k_row_values.data(), head_dim);
             }
             mean_score /= static_cast<float>(num_heads);
+            mean_dense_score /= static_cast<float>(num_heads);
+            dense_scores[active_index] = mean_dense_score;
+            const float abs_error = std::fabs(mean_score - mean_dense_score);
+            total_abs_error += abs_error;
+            summary.max_abs_error = std::max(summary.max_abs_error, abs_error);
 
             if (active_index == 0) {
                 summary.first_score = mean_score;
+                summary.dense_first_score = mean_dense_score;
             }
             if (mean_score > best_score) {
                 best_score = mean_score;
                 summary.top_score = mean_score;
                 summary.top_row = active_rows[active_index];
             }
+            if (mean_dense_score > best_dense_score) {
+                best_dense_score = mean_dense_score;
+                summary.dense_top_score = mean_dense_score;
+                summary.dense_top_row = active_rows[active_index];
+            }
         }
+
+        summary.mean_abs_error = total_abs_error / static_cast<float>(active_rows.size());
+        summary.top_match = summary.top_row == summary.dense_top_row ? 1 : 0;
     }
 
 cleanup:
@@ -931,7 +1020,7 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
                      static_cast<long long>(sidecar.tiles_per_row));
 
         if (tensor->op == GGML_OP_FLASH_ATTN_EXT) {
-            const auto score_summary = openturbo_run_shadow_score(tensor->src[0], cache_tensor, mask_tensor, sidecar);
+            const auto score_summary = openturbo_run_shadow_score(tensor->src[0], tensor->src[1], cache_tensor, mask_tensor, sidecar);
             if (score_summary.success) {
                 std::fprintf(stderr,
                              "[openturbo] shadow_score layer=%d status=success node=%s active_rows=%d num_heads=%d num_query_heads=%d query_head_group=%d num_query_tiles=%d first_row=%lld first_score=%.6f top_row=%lld top_score=%.6f\\n",
@@ -946,9 +1035,29 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
                              score_summary.first_score,
                              static_cast<long long>(score_summary.top_row),
                              score_summary.top_score);
+                std::fprintf(stderr,
+                             "[openturbo] shadow_compare layer=%d status=success node=%s active_rows=%d top_match=%d first_row=%lld shadow_first=%.6f dense_first=%.6f shadow_top_row=%lld shadow_top=%.6f dense_top_row=%lld dense_top=%.6f mae=%.6f max_abs_error=%.6f\\n",
+                             layer_index,
+                             ggml_get_name(tensor),
+                             score_summary.active_rows,
+                             score_summary.top_match,
+                             static_cast<long long>(score_summary.first_row),
+                             score_summary.first_score,
+                             score_summary.dense_first_score,
+                             static_cast<long long>(score_summary.top_row),
+                             score_summary.top_score,
+                             static_cast<long long>(score_summary.dense_top_row),
+                             score_summary.dense_top_score,
+                             score_summary.mean_abs_error,
+                             score_summary.max_abs_error);
             } else {
                 std::fprintf(stderr,
                              "[openturbo] shadow_score layer=%d status=%s node=%s\\n",
+                             layer_index,
+                             score_summary.reason,
+                             ggml_get_name(tensor));
+                std::fprintf(stderr,
+                             "[openturbo] shadow_compare layer=%d status=%s node=%s\\n",
                              layer_index,
                              score_summary.reason,
                              ggml_get_name(tensor));
