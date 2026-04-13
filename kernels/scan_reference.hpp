@@ -53,4 +53,17 @@ namespace openturbo
 
         return main_polar_dot + local_alpha * static_cast<float>(qjl_correlation);
     }
+
+    inline float estimate_scan_dot_multi_tile(
+        const PackedTileHeader *query_headers,
+        const PackedTileHeader *cache_headers,
+        int num_query_tiles)
+    {
+        float total = 0.0f;
+        for (int tile_index = 0; tile_index < num_query_tiles; ++tile_index)
+        {
+            total += estimate_scan_dot(query_headers[tile_index], cache_headers[tile_index]);
+        }
+        return total;
+    }
 }

@@ -17,22 +17,11 @@ namespace openturbo
         return value;
     }
 
-    __global__ void scan_query_many_cache_kernel(
-        const PackedTileHeader *__restrict__ query_header,
-        const PackedTileHeader *__restrict__ cache_headers,
-        float *__restrict__ output,
-        int num_cache_tiles)
+    __device__ __forceinline__ float scan_one_tile_estimate(
+        const PackedTileHeader &query,
+        const PackedTileHeader &cache_header,
+        int lane_id)
     {
-        const int lane_id = threadIdx.x & 31;
-        const int cache_tile_id = blockIdx.x;
-
-        if (cache_tile_id >= num_cache_tiles)
-        {
-            return;
-        }
-
-        const PackedTileHeader query = query_header[0];
-        const PackedTileHeader cache_header = cache_headers[cache_tile_id];
         const float query_scale = __half2float(query.block_scale_fp16);
         const float cache_scale = __half2float(cache_header.block_scale_fp16);
         const float local_alpha = __half2float(cache_header.local_alpha_fp16);
@@ -69,9 +58,59 @@ namespace openturbo
         }
         qjl_correlation = __shfl_sync(0xffffffffu, qjl_correlation, 0);
 
+        return main_polar_dot + local_alpha * static_cast<float>(qjl_correlation);
+    }
+
+    __global__ void scan_query_many_cache_kernel(
+        const PackedTileHeader *__restrict__ query_header,
+        const PackedTileHeader *__restrict__ cache_headers,
+        float *__restrict__ output,
+        int num_cache_tiles)
+    {
+        const int lane_id = threadIdx.x & 31;
+        const int cache_tile_id = blockIdx.x;
+
+        if (cache_tile_id >= num_cache_tiles)
+        {
+            return;
+        }
+
+        const PackedTileHeader query = query_header[0];
+        const PackedTileHeader cache_header = cache_headers[cache_tile_id];
+        const float estimate = scan_one_tile_estimate(query, cache_header, lane_id);
+
         if (lane_id == 0)
         {
-            output[cache_tile_id] = main_polar_dot + local_alpha * static_cast<float>(qjl_correlation);
+            output[cache_tile_id] = estimate;
+        }
+    }
+
+    __global__ void scan_query_many_cache_multi_tile_kernel(
+        const PackedTileHeader *__restrict__ query_headers,
+        const PackedTileHeader *__restrict__ cache_headers,
+        float *__restrict__ output,
+        int num_query_tiles,
+        int num_cache_tokens)
+    {
+        const int lane_id = threadIdx.x & 31;
+        const int cache_token_id = blockIdx.x;
+
+        if (cache_token_id >= num_cache_tokens)
+        {
+            return;
+        }
+
+        float total = 0.0f;
+        for (int tile_index = 0; tile_index < num_query_tiles; ++tile_index)
+        {
+            const PackedTileHeader query = query_headers[tile_index];
+            const PackedTileHeader cache = cache_headers[cache_token_id * num_query_tiles + tile_index];
+            total += scan_one_tile_estimate(query, cache, lane_id);
+        }
+
+        if (lane_id == 0)
+        {
+            output[cache_token_id] = total;
         }
     }
 
@@ -92,6 +131,28 @@ namespace openturbo
             cache_headers,
             output,
             num_cache_tiles);
+        return cudaGetLastError();
+    }
+
+    cudaError_t launch_scan_query_many_cache_multi_tile(
+        const PackedTileHeader *query_headers,
+        const PackedTileHeader *cache_headers,
+        float *output,
+        int num_query_tiles,
+        int num_cache_tokens,
+        cudaStream_t stream)
+    {
+        if (num_query_tiles <= 0 || num_cache_tokens <= 0)
+        {
+            return cudaSuccess;
+        }
+
+        scan_query_many_cache_multi_tile_kernel<<<num_cache_tokens, 32, 0, stream>>>(
+            query_headers,
+            cache_headers,
+            output,
+            num_query_tiles,
+            num_cache_tokens);
         return cudaGetLastError();
     }
 }

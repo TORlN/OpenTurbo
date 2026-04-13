@@ -14,6 +14,7 @@ namespace
 {
     constexpr float kScanAbsTolerance = 1e-2f;
     constexpr float kScanRelTolerance = 1e-5f;
+    constexpr int kBenchmarkIterations = 200;
 
     struct TileCase
     {
@@ -27,6 +28,16 @@ namespace
         const char *cache_name;
         openturbo::PackedTileHeader cache_header;
         float expected;
+    };
+
+    struct MultiTileScanCase
+    {
+        const char *name;
+        int num_query_tiles;
+        int num_cache_tokens;
+        openturbo::PackedTileHeader query_headers[4];
+        openturbo::PackedTileHeader cache_headers[16];
+        float expected[4];
     };
 
     void check_cuda(cudaError_t status, const char *what)
@@ -106,6 +117,37 @@ namespace
         return tile_case;
     }
 
+    MultiTileScanCase make_multi_tile_case(
+        const TileCase &query_a,
+        const TileCase &query_b,
+        const TileCase &cache_token0_a,
+        const TileCase &cache_token0_b,
+        const TileCase &cache_token1_a,
+        const TileCase &cache_token1_b,
+        const TileCase &cache_token2_a,
+        const TileCase &cache_token2_b)
+    {
+        MultiTileScanCase scan_case{};
+        scan_case.name = "Two-Tile Head Scan";
+        scan_case.num_query_tiles = 2;
+        scan_case.num_cache_tokens = 3;
+
+        scan_case.query_headers[0] = query_a.header;
+        scan_case.query_headers[1] = query_b.header;
+
+        scan_case.cache_headers[0] = cache_token0_a.header;
+        scan_case.cache_headers[1] = cache_token0_b.header;
+        scan_case.cache_headers[2] = cache_token1_a.header;
+        scan_case.cache_headers[3] = cache_token1_b.header;
+        scan_case.cache_headers[4] = cache_token2_a.header;
+        scan_case.cache_headers[5] = cache_token2_b.header;
+
+        scan_case.expected[0] = openturbo::estimate_scan_dot_multi_tile(scan_case.query_headers, &scan_case.cache_headers[0], scan_case.num_query_tiles);
+        scan_case.expected[1] = openturbo::estimate_scan_dot_multi_tile(scan_case.query_headers, &scan_case.cache_headers[2], scan_case.num_query_tiles);
+        scan_case.expected[2] = openturbo::estimate_scan_dot_multi_tile(scan_case.query_headers, &scan_case.cache_headers[4], scan_case.num_query_tiles);
+        return scan_case;
+    }
+
     void run_scan_batch(const TileCase &query_case, const ScanPairCase *pair_cases, int count)
     {
         openturbo::PackedTileHeader host_cache_headers[4];
@@ -150,6 +192,120 @@ namespace
         check_cuda(cudaFree(device_cache_headers), "cudaFree(device_cache_headers)");
         check_cuda(cudaFree(device_query_header), "cudaFree(device_query_header)");
     }
+
+    void run_multi_tile_scan_case(const MultiTileScanCase &scan_case)
+    {
+        openturbo::PackedTileHeader *device_query_headers = nullptr;
+        openturbo::PackedTileHeader *device_cache_headers = nullptr;
+        float *device_output = nullptr;
+        float host_output[4] = {};
+
+        const size_t query_bytes = static_cast<size_t>(scan_case.num_query_tiles) * sizeof(openturbo::PackedTileHeader);
+        const size_t cache_bytes = static_cast<size_t>(scan_case.num_query_tiles) * static_cast<size_t>(scan_case.num_cache_tokens) * sizeof(openturbo::PackedTileHeader);
+        const size_t output_bytes = static_cast<size_t>(scan_case.num_cache_tokens) * sizeof(float);
+
+        check_cuda(cudaMalloc(&device_query_headers, query_bytes), "cudaMalloc(device_query_headers)");
+        check_cuda(cudaMalloc(&device_cache_headers, cache_bytes), "cudaMalloc(device_cache_headers)");
+        check_cuda(cudaMalloc(&device_output, output_bytes), "cudaMalloc(device_output)");
+
+        check_cuda(cudaMemcpy(device_query_headers, scan_case.query_headers, query_bytes, cudaMemcpyHostToDevice), "cudaMemcpy(multi query headers)");
+        check_cuda(cudaMemcpy(device_cache_headers, scan_case.cache_headers, cache_bytes, cudaMemcpyHostToDevice), "cudaMemcpy(multi cache headers)");
+        check_cuda(cudaMemset(device_output, 0, output_bytes), "cudaMemset(multi output)");
+
+        check_cuda(
+            openturbo::launch_scan_query_many_cache_multi_tile(
+                device_query_headers,
+                device_cache_headers,
+                device_output,
+                scan_case.num_query_tiles,
+                scan_case.num_cache_tokens),
+            "launch_scan_query_many_cache_multi_tile");
+        check_cuda(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
+
+        check_cuda(cudaMemcpy(host_output, device_output, output_bytes, cudaMemcpyDeviceToHost), "cudaMemcpy(multi output)");
+
+        std::printf("\nMULTI-TILE CASE: %s\n", scan_case.name);
+        for (int i = 0; i < scan_case.num_cache_tokens; ++i)
+        {
+            std::printf("MULTI SCAN TEST token %d gpu=%f ref=%f\n", i, host_output[i], scan_case.expected[i]);
+            require_close(host_output[i], scan_case.expected[i], "multi-tile scan kernel mismatch");
+        }
+
+        check_cuda(cudaFree(device_output), "cudaFree(device_output)");
+        check_cuda(cudaFree(device_cache_headers), "cudaFree(device_cache_headers)");
+        check_cuda(cudaFree(device_query_headers), "cudaFree(device_query_headers)");
+    }
+
+    void run_benchmark_smoke(const MultiTileScanCase &scan_case)
+    {
+        openturbo::PackedTileHeader *device_query_headers = nullptr;
+        openturbo::PackedTileHeader *device_cache_headers = nullptr;
+        float *device_output = nullptr;
+        cudaEvent_t start_event = nullptr;
+        cudaEvent_t stop_event = nullptr;
+
+        const int benchmark_cache_tokens = 512;
+        const int query_tiles = scan_case.num_query_tiles;
+        const size_t query_bytes = static_cast<size_t>(query_tiles) * sizeof(openturbo::PackedTileHeader);
+        const size_t cache_bytes = static_cast<size_t>(query_tiles) * static_cast<size_t>(benchmark_cache_tokens) * sizeof(openturbo::PackedTileHeader);
+        const size_t output_bytes = static_cast<size_t>(benchmark_cache_tokens) * sizeof(float);
+
+        openturbo::PackedTileHeader host_query_headers[4] = {};
+        openturbo::PackedTileHeader host_cache_headers[2048] = {};
+        for (int tile_index = 0; tile_index < query_tiles; ++tile_index)
+        {
+            host_query_headers[tile_index] = scan_case.query_headers[tile_index];
+        }
+        for (int token_index = 0; token_index < benchmark_cache_tokens; ++token_index)
+        {
+            const int pattern = token_index % scan_case.num_cache_tokens;
+            for (int tile_index = 0; tile_index < query_tiles; ++tile_index)
+            {
+                host_cache_headers[token_index * query_tiles + tile_index] = scan_case.cache_headers[pattern * query_tiles + tile_index];
+            }
+        }
+
+        check_cuda(cudaMalloc(&device_query_headers, query_bytes), "cudaMalloc(benchmark query headers)");
+        check_cuda(cudaMalloc(&device_cache_headers, cache_bytes), "cudaMalloc(benchmark cache headers)");
+        check_cuda(cudaMalloc(&device_output, output_bytes), "cudaMalloc(benchmark output)");
+        check_cuda(cudaMemcpy(device_query_headers, host_query_headers, query_bytes, cudaMemcpyHostToDevice), "cudaMemcpy(benchmark query)");
+        check_cuda(cudaMemcpy(device_cache_headers, host_cache_headers, cache_bytes, cudaMemcpyHostToDevice), "cudaMemcpy(benchmark cache)");
+        check_cuda(cudaEventCreate(&start_event), "cudaEventCreate(start)");
+        check_cuda(cudaEventCreate(&stop_event), "cudaEventCreate(stop)");
+
+        check_cuda(cudaEventRecord(start_event), "cudaEventRecord(start)");
+        for (int iteration = 0; iteration < kBenchmarkIterations; ++iteration)
+        {
+            check_cuda(
+                openturbo::launch_scan_query_many_cache_multi_tile(
+                    device_query_headers,
+                    device_cache_headers,
+                    device_output,
+                    query_tiles,
+                    benchmark_cache_tokens),
+                "launch_scan_query_many_cache_multi_tile benchmark");
+        }
+        check_cuda(cudaEventRecord(stop_event), "cudaEventRecord(stop)");
+        check_cuda(cudaEventSynchronize(stop_event), "cudaEventSynchronize(stop)");
+
+        float elapsed_ms = 0.0f;
+        check_cuda(cudaEventElapsedTime(&elapsed_ms, start_event, stop_event), "cudaEventElapsedTime");
+        const float avg_ms = elapsed_ms / static_cast<float>(kBenchmarkIterations);
+        const float scans_per_second = (1000.0f * static_cast<float>(benchmark_cache_tokens)) / avg_ms;
+
+        std::printf(
+            "\nBENCHMARK: query_tiles=%d cache_tokens=%d avg_ms=%f scans_per_sec=%f\n",
+            query_tiles,
+            benchmark_cache_tokens,
+            avg_ms,
+            scans_per_second);
+
+        check_cuda(cudaEventDestroy(stop_event), "cudaEventDestroy(stop)");
+        check_cuda(cudaEventDestroy(start_event), "cudaEventDestroy(start)");
+        check_cuda(cudaFree(device_output), "cudaFree(benchmark output)");
+        check_cuda(cudaFree(device_cache_headers), "cudaFree(benchmark cache)");
+        check_cuda(cudaFree(device_query_headers), "cudaFree(benchmark query)");
+    }
 }
 
 int main()
@@ -168,8 +324,20 @@ int main()
         {sparse.name, random.name, random.header, openturbo::estimate_scan_dot(sparse.header, random.header)},
         {sparse.name, sparse.name, sparse.header, openturbo::estimate_scan_dot(sparse.header, sparse.header)}};
 
+    const MultiTileScanCase multi_tile_case = make_multi_tile_case(
+        alternating,
+        sparse,
+        alternating,
+        random,
+        random,
+        sparse,
+        sparse,
+        alternating);
+
     run_scan_batch(alternating, alternating_query_cases, 3);
     run_scan_batch(sparse, sparse_query_cases, 3);
+    run_multi_tile_scan_case(multi_tile_case);
+    run_benchmark_smoke(multi_tile_case);
 
     std::printf("\nPASS: GPU scan kernel matches CPU reference.\n");
 

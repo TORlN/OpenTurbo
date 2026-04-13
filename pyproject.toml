@@ -15,5 +15,8 @@ dependencies = []
 [project.urls]
 Homepage = "https://example.com"
 
+[project.optional-dependencies]
+bindings = ["pybind11>=2.12"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
