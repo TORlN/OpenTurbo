@@ -402,3 +402,41 @@ def test_probe_runner_parser_keeps_packed_score_path_enabled_by_default() -> Non
     args = probe_runner.build_arg_parser().parse_args([])
 
     assert args.packed_score_path is True
+
+
+def test_report_generator_parses_latest_probe_execution_and_formats_table(tmp_path: Path) -> None:
+    output = "\n".join(
+        [
+            "[openturbo] shadow_compare layer=0 raw_top_match=0 fwht_top_match=1 fwht_mean_scale_ratio=0.91",
+            "[openturbo] shadow_snr layer=0 fwht_snr_db=18.0 signal_retention=97.0",
+            "[openturbo] shadow_compare layer=8 raw_top_match=1 fwht_top_match=1 fwht_mean_scale_ratio=1.066",
+            "[openturbo] shadow_snr layer=8 fwht_snr_db=25.43 signal_retention=99.71",
+        ]
+    )
+
+    generator = probe_runner.ReportGenerator(tmp_path, "RTX 4090")
+    summary = generator.parse_latest_probe_execution(
+        output,
+        model_path=Path("Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"),
+        hf_repo="bartowski/Meta-Llama-3.1-8B-Instruct-GGUF",
+        hf_file="Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+    )
+    report = generator.generate_ascii_table(summary)
+
+    assert summary.raw_top_match == pytest.approx(1.0)
+    assert summary.signal_retention == pytest.approx(99.71)
+    assert summary.fwht_snr_db == pytest.approx(25.43)
+    assert summary.fwht_mean_scale_ratio == pytest.approx(1.066)
+    assert "| Token Top-Match" in report
+    assert "100%" in report
+    assert "HIGH-FI" in report
+    assert "RTX 4090" in report
+    assert "Llama-3.1-8B" in report
+
+
+def test_report_generator_writes_latest_report(tmp_path: Path) -> None:
+    generator = probe_runner.ReportGenerator(tmp_path, "RTX 4090")
+    report_path = generator.write_latest_report("summary\n")
+
+    assert report_path == tmp_path / "PROBE_REPORT_LATEST.txt"
+    assert report_path.read_text(encoding="utf-8") == "summary\n"

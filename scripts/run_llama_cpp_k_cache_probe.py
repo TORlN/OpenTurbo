@@ -8,6 +8,7 @@ import subprocess
 import sys
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 from scaffold_llama_cpp_integration import apply_probe_patch
@@ -30,6 +31,9 @@ DEFAULT_HF_REPO = "bartowski/Meta-Llama-3.1-8B-Instruct-GGUF"
 DEFAULT_HF_FILE = "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
 DEFAULT_BENCHMARK_LAYERS = "0,8,16,24,31"
 DEFAULT_BENCHMARK_OUTPUT = Path("benchmarks/llama31_shadow_benchmark.md")
+DEFAULT_PROBE_REPORT_OUTPUT = Path("PROBE_REPORT_LATEST.txt")
+DEFAULT_GPU_LABEL = "RTX 4090"
+DEFAULT_VRAM_COMPRESSION = "~72%"
 DEFAULT_BENCHMARK_PROMPTS = [
     "Explain why the sky is blue in two sentences.",
     "Write a haiku about debugging CUDA kernels.",
@@ -48,6 +52,163 @@ SHADOW_SNR_PATTERN = re.compile(r"^\[openturbo\] shadow_snr .*$", re.MULTILINE)
 SHADOW_COMPONENTS_PATTERN = re.compile(r"^\[openturbo\] shadow_components .*$", re.MULTILINE)
 SHADOW_LEGACY_PATTERN = re.compile(r"^\[openturbo\] shadow_legacy .*$", re.MULTILINE)
 KEY_VALUE_PATTERN = re.compile(r"([A-Za-z_]+)=([^\s]+)")
+
+
+class ProbeSummary:
+    def __init__(
+        self,
+        *,
+        raw_top_match: float,
+        signal_retention: float,
+        fwht_snr_db: float,
+        fwht_mean_scale_ratio: float,
+        gpu_label: str,
+        model_label: str,
+        timestamp_utc: str,
+    ) -> None:
+        self.raw_top_match = raw_top_match
+        self.signal_retention = signal_retention
+        self.fwht_snr_db = fwht_snr_db
+        self.fwht_mean_scale_ratio = fwht_mean_scale_ratio
+        self.gpu_label = gpu_label
+        self.model_label = model_label
+        self.timestamp_utc = timestamp_utc
+
+
+class ReportGenerator:
+    def __init__(self, repo_root: Path, gpu_label: str = DEFAULT_GPU_LABEL) -> None:
+        self.repo_root = repo_root
+        self.gpu_label = gpu_label
+
+    def parse_latest_probe_execution(
+        self,
+        output: str,
+        *,
+        model_path: Path,
+        hf_repo: str,
+        hf_file: str,
+    ) -> ProbeSummary:
+        compare_fields = self._latest_fields(output, "[openturbo] shadow_compare ")
+        snr_fields = self._latest_fields(output, "[openturbo] shadow_snr ")
+
+        raw_top_match = self._parse_float(
+            compare_fields,
+            "raw_top_match",
+            fallback_keys=("top_match", "fwht_top_match"),
+        )
+        signal_retention = self._parse_float(snr_fields, "signal_retention")
+        fwht_snr_db = self._parse_float(snr_fields, "fwht_snr_db")
+        fwht_mean_scale_ratio = self._parse_float(compare_fields, "fwht_mean_scale_ratio")
+
+        return ProbeSummary(
+            raw_top_match=raw_top_match,
+            signal_retention=signal_retention,
+            fwht_snr_db=fwht_snr_db,
+            fwht_mean_scale_ratio=fwht_mean_scale_ratio,
+            gpu_label=self.gpu_label,
+            model_label=self._infer_model_label(model_path, hf_repo, hf_file),
+            timestamp_utc=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        )
+
+    def generate_ascii_table(self, summary: ProbeSummary, benchmark_output: Path | None = None) -> str:
+        rows = [
+            ("Token Top-Match", f"{summary.raw_top_match * 100:.0f}%", self._top_match_status(summary.raw_top_match)),
+            ("Signal Retention", f"{summary.signal_retention:.2f}%", self._retention_status(summary.signal_retention)),
+            ("SNR (Signal/Noise)", f"{summary.fwht_snr_db:.2f} dB", self._snr_status(summary.fwht_snr_db)),
+            ("Scale Ratio", f"{summary.fwht_mean_scale_ratio:.3f}x", self._scale_ratio_status(summary.fwht_mean_scale_ratio)),
+            ("VRAM Compression", DEFAULT_VRAM_COMPRESSION, "TARGET"),
+        ]
+
+        lines = [
+            "OpenTurbo Probe Executive Summary",
+            "",
+            "| Metric              | Value     | Status     |",
+            "|---------------------|-----------|------------|",
+        ]
+        for metric, value, status in rows:
+            lines.append(f"| {metric:<19} | {value:<9} | {status:<10} |")
+
+        lines.append("")
+        lines.append(f"GPU: {summary.gpu_label}")
+        lines.append(f"Model: {summary.model_label}")
+        lines.append(f"Timestamp: {summary.timestamp_utc}")
+        if benchmark_output is not None:
+            lines.append(f"Benchmark Markdown: {benchmark_output}")
+        lines.append(f"Saved Report: {self.repo_root / DEFAULT_PROBE_REPORT_OUTPUT}")
+        return "\n".join(lines) + "\n"
+
+    def write_latest_report(self, report_text: str) -> Path:
+        report_path = self.repo_root / DEFAULT_PROBE_REPORT_OUTPUT
+        report_path.write_text(report_text, encoding="utf-8")
+        return report_path
+
+    @staticmethod
+    def _latest_fields(output: str, prefix: str) -> dict[str, str]:
+        latest_line: str | None = None
+        for line in output.splitlines():
+            if line.startswith(prefix):
+                latest_line = line
+
+        if latest_line is None:
+            raise RuntimeError(f"Missing probe metric line with prefix: {prefix}")
+
+        return parse_log_fields(latest_line)
+
+    @staticmethod
+    def _parse_float(fields: dict[str, str], key: str, fallback_keys: tuple[str, ...] = ()) -> float:
+        for candidate_key in (key, *fallback_keys):
+            if candidate_key in fields:
+                return float(fields[candidate_key])
+        raise RuntimeError(f"Missing probe metric field: {key}")
+
+    @staticmethod
+    def _top_match_status(value: float) -> str:
+        if value >= 1.0:
+            return "PERFECT"
+        if value >= 0.99:
+            return "ELITE"
+        if value >= 0.95:
+            return "STRONG"
+        return "DRIFT"
+
+    @staticmethod
+    def _retention_status(value: float) -> str:
+        if value >= 99.5:
+            return "ELITE"
+        if value >= 98.5:
+            return "HIGH"
+        if value >= 97.0:
+            return "STRONG"
+        return "CHECK"
+
+    @staticmethod
+    def _snr_status(value: float) -> str:
+        if value >= 25.0:
+            return "HIGH-FI"
+        if value >= 20.0:
+            return "CLEAN"
+        if value >= 15.0:
+            return "STABLE"
+        return "NOISY"
+
+    @staticmethod
+    def _scale_ratio_status(value: float) -> str:
+        drift = abs(value - 1.0)
+        if drift <= 0.08:
+            return "LOCKED"
+        if drift <= 0.15:
+            return "CLOSE"
+        return "DRIFT"
+
+    @staticmethod
+    def _infer_model_label(model_path: Path, hf_repo: str, hf_file: str) -> str:
+        candidates = [model_path.stem, hf_file, hf_repo.split("/")[-1]]
+        normalized = " ".join(candidates).lower()
+        if "3.1" in normalized and "8b" in normalized and "llama" in normalized:
+            return "Llama-3.1-8B"
+        if "8b" in normalized and "llama" in normalized:
+            return "Llama-3-8B"
+        return model_path.stem
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -182,6 +343,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--force-bindings-refresh",
         action="store_true",
         help="Force a rebuild of the local OpenTurbo CUDA bindings before configuring the downstream probe.",
+    )
+    parser.add_argument(
+        "--gpu-label",
+        default=DEFAULT_GPU_LABEL,
+        help=f"GPU label to embed in the executive probe report. Default: {DEFAULT_GPU_LABEL}.",
     )
     return parser
 
@@ -513,9 +679,10 @@ def parse_probe_output(output: str, returncode: int) -> tuple[str, str, str, str
     )
 
 
-def run_probe(runner: Path, model_path: Path, prompt: str, seed: str, ngl: str) -> tuple[str, str, str, str, str, str, str, str]:
+def run_probe(runner: Path, model_path: Path, prompt: str, seed: str, ngl: str) -> str:
     output = run_probe_output(runner, model_path, prompt, seed, ngl)
-    return parse_probe_output(output, 0)
+    parse_probe_output(output, 0)
+    return output
 
 
 def main() -> int:
@@ -557,6 +724,7 @@ def main() -> int:
     if args.benchmark:
         prompts = load_benchmark_prompts(args.benchmark_prompts_file)
         benchmark_rows: list[dict[str, float | int | str]] = []
+        latest_output: str | None = None
         try:
             base_seed = int(args.seed)
         except ValueError:
@@ -566,33 +734,39 @@ def main() -> int:
             prompt_seed = str(base_seed + prompt_index - 1)
             print(f"Benchmark prompt {prompt_index}/{len(prompts)}", flush=True)
             output = run_probe_output(runner, model_path, prompt, prompt_seed, args.ngl, args.layer_filter)
+            parse_probe_output(output, 0)
             benchmark_rows.extend(collect_benchmark_rows(output, f"P{prompt_index}"))
+            latest_output = output
 
         benchmark_report = format_benchmark_report(benchmark_rows, args.layer_filter)
         benchmark_output = (args.benchmark_output or (repo_root / DEFAULT_BENCHMARK_OUTPUT)).resolve()
         write_benchmark_report(benchmark_output, benchmark_report)
-        print(f"llama_root={llama_root}")
-        print(f"build_dir={build_dir}")
-        print(f"model_path={model_path}")
-        print(f"benchmark_output={benchmark_output}")
-        print(benchmark_report)
+        if latest_output is None:
+            raise RuntimeError("Benchmark completed without any probe output to summarize.")
+
+        report_generator = ReportGenerator(repo_root, args.gpu_label)
+        summary = report_generator.parse_latest_probe_execution(
+            latest_output,
+            model_path=model_path,
+            hf_repo=args.hf_repo,
+            hf_file=args.hf_file,
+        )
+        report_text = report_generator.generate_ascii_table(summary, benchmark_output=benchmark_output)
+        report_generator.write_latest_report(report_text)
+        print(report_text)
         return 0
 
-    probe_line, shadow_line, shadow_read_line, shadow_score_line, shadow_compare_line, shadow_snr_line, shadow_components_line, shadow_legacy_line = run_probe(runner, model_path, args.prompt, args.seed, args.ngl)
-
-    print(f"llama_root={llama_root}")
-    print(f"build_dir={build_dir}")
-    print(f"model_path={model_path}")
-    print(f"hf_repo={args.hf_repo}")
-    print(f"hf_file={args.hf_file}")
-    print(probe_line)
-    print(shadow_line)
-    print(shadow_read_line)
-    print(shadow_score_line)
-    print(shadow_compare_line)
-    print(shadow_snr_line)
-    print(shadow_components_line)
-    print(shadow_legacy_line)
+    probe_output = run_probe(runner, model_path, args.prompt, args.seed, args.ngl)
+    report_generator = ReportGenerator(repo_root, args.gpu_label)
+    summary = report_generator.parse_latest_probe_execution(
+        probe_output,
+        model_path=model_path,
+        hf_repo=args.hf_repo,
+        hf_file=args.hf_file,
+    )
+    report_text = report_generator.generate_ascii_table(summary)
+    report_generator.write_latest_report(report_text)
+    print(report_text)
     return 0
 
 
