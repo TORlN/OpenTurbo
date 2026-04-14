@@ -161,9 +161,14 @@ def test_apply_packed_score_patch_invokes_tracked_patch_bundle(monkeypatch: pyte
     ggml_cuda_root.mkdir(parents=True)
     (ggml_cuda_root / "fattn.cu").write_text("void placeholder() {}\n", encoding="utf-8")
     (ggml_cuda_root / "ggml-cuda.cu").write_text("void placeholder_dispatch() {}\n", encoding="utf-8")
+    (tmp_path / "src").mkdir(parents=True)
+    (tmp_path / "src" / "llama-kv-cache.cpp").write_text("void placeholder_kv_cache() {}\n", encoding="utf-8")
 
-    patch_file = tmp_path / "ggml_cuda_packed_score_path.patch"
-    patch_file.write_text("diff --git a/foo b/foo\n", encoding="utf-8")
+    patch_dir = tmp_path / "patches"
+    patch_dir.mkdir()
+    patch_files = [patch_dir / "sidecar_core.patch", patch_dir / "fattn_injection.patch", patch_dir / "llama_hooks.patch"]
+    for patch_file in patch_files:
+        patch_file.write_text("diff --git a/foo b/foo\n", encoding="utf-8")
 
     recorded: list[list[str]] = []
 
@@ -172,10 +177,13 @@ def test_apply_packed_score_patch_invokes_tracked_patch_bundle(monkeypatch: pyte
 
     monkeypatch.setattr(scaffold.subprocess, "run", fake_run)
 
-    changed = scaffold.apply_packed_score_patch(tmp_path, patch_file)
+    changed = scaffold.apply_packed_score_patch(tmp_path, patch_dir)
 
     assert changed is True
-    assert recorded == [["git", "-C", str(tmp_path), "apply", "--whitespace=nowarn", str(patch_file.resolve())]]
+    assert recorded == [
+        ["git", "-C", str(tmp_path), "apply", "--whitespace=nowarn", str(path.resolve())]
+        for path in patch_files
+    ]
 
 
 def test_apply_packed_score_patch_is_idempotent_when_markers_exist(tmp_path: Path) -> None:
@@ -185,10 +193,21 @@ def test_apply_packed_score_patch_is_idempotent_when_markers_exist(tmp_path: Pat
     (ggml_cuda_root / "openturbo-sidecar.cu").write_text("void sidecar() {}\n", encoding="utf-8")
     (ggml_cuda_root / "fattn.cu").write_text("bool ggml_cuda_flash_attn_ext_openturbo_supported(const ggml_tensor * dst) { return dst != nullptr; }\n", encoding="utf-8")
     (ggml_cuda_root / "ggml-cuda.cu").write_text('GGML_LOG_INFO("%s: OpenTurbo packed flash-attn path active\\n", __func__);\n', encoding="utf-8")
+    (tmp_path / "src").mkdir(parents=True)
+    (tmp_path / "src" / "llama-kv-cache.cpp").write_text("bool openturbo_sync_k_sidecars() { return true; }\n", encoding="utf-8")
 
     changed = scaffold.apply_packed_score_patch(tmp_path, tmp_path / "missing.patch")
 
     assert changed is False
+
+
+def test_resolve_packed_score_patch_files_returns_expected_order(tmp_path: Path) -> None:
+    patch_dir = tmp_path / "patches"
+    patch_dir.mkdir()
+
+    resolved = scaffold.resolve_packed_score_patch_files(patch_dir)
+
+    assert [path.name for path in resolved] == ["sidecar_core.patch", "fattn_injection.patch", "llama_hooks.patch"]
 
 
 def test_parse_probe_output_requires_both_lines() -> None:

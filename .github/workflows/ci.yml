@@ -12,6 +12,11 @@ on:
         required: false
         default: false
         type: boolean
+      run_windows_cuda_probe:
+        description: Run the downstream llama.cpp probe workflow on a self-hosted CUDA runner
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   test:
@@ -62,6 +67,10 @@ jobs:
         uses: actions/setup-python@v4
         with:
           python-version: '3.11'
+      - name: Validate CUDA build environment
+        shell: powershell
+        run: |
+          python .\scripts\check_env.py --require-msvc --require-cuda --json
       - name: Install Python test dependencies
         run: |
           python -m pip install --upgrade pip
@@ -72,3 +81,27 @@ jobs:
       - name: Run tests
         run: |
           pytest -q
+
+  windows-cuda-probe:
+    if: github.event_name == 'workflow_dispatch' && inputs.run_windows_cuda_probe
+    runs-on: [self-hosted, windows, x64, cuda]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Validate CUDA probe environment
+        shell: powershell
+        run: |
+          python .\scripts\check_env.py --require-msvc --require-cuda --json
+      - name: Install Python test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip install --upgrade pip
+          .\.venv\Scripts\python.exe -m pip install .[test]
+      - name: Run downstream CUDA probe
+        shell: powershell
+        run: |
+          .\.venv\Scripts\python.exe .\scripts\run_llama_cpp_k_cache_probe.py --force-bindings-refresh --ngl 999 --llama-root .\build\llama_bootstrap_test

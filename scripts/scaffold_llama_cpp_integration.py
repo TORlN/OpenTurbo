@@ -8,7 +8,12 @@ from pathlib import Path
 
 DEFAULT_LLAMA_CPP_URL = "https://github.com/ggml-org/llama.cpp.git"
 DEFAULT_LLAMA_DIR_NAME = "llama"
-DEFAULT_PACKED_SCORE_PATCH = Path(__file__).resolve().parent.parent / "patches" / "llama_cpp" / "ggml_cuda_packed_score_path.patch"
+DEFAULT_PACKED_SCORE_PATCH_DIR = Path(__file__).resolve().parent.parent / "patches" / "llama_cpp"
+DEFAULT_PACKED_SCORE_PATCHES = (
+    DEFAULT_PACKED_SCORE_PATCH_DIR / "sidecar_core.patch",
+    DEFAULT_PACKED_SCORE_PATCH_DIR / "fattn_injection.patch",
+    DEFAULT_PACKED_SCORE_PATCH_DIR / "llama_hooks.patch",
+)
 
 
 BRIDGE_HEADER = """#pragma once
@@ -208,7 +213,7 @@ Probe automation:
 3. If OpenTurbo is not adjacent to the checkout, also pass `-DOPENTURBO_ROOT=<path-to-openturbo>`.
 4. Build and run one narrow inference path to capture the one-time `cpy_k` probe log line.
 
-The tracked `ggml-cuda` packed-score-path integration now lives in `patches/llama_cpp/ggml_cuda_packed_score_path.patch` and can be applied with `--packed-score-path`.
+The tracked `ggml-cuda` packed-score-path integration now lives in three ordered patch files under `patches/llama_cpp/` and can be applied with `--packed-score-path`.
 
 The probe patching logic targets the current llama.cpp `llama_kv_cache::cpy_k()` layout and fails fast if the expected insertion points are not present.
 """
@@ -1905,31 +1910,49 @@ def packed_score_patch_present(llama_root: Path) -> bool:
     sidecar_source = llama_root / "ggml" / "src" / "ggml-cuda" / "openturbo-sidecar.cu"
     fattn_source = llama_root / "ggml" / "src" / "ggml-cuda" / "fattn.cu"
     dispatch_source = llama_root / "ggml" / "src" / "ggml-cuda" / "ggml-cuda.cu"
+    kv_cache_source = llama_root / "src" / "llama-kv-cache.cpp"
 
-    if not sidecar_header.exists() or not sidecar_source.exists() or not fattn_source.exists() or not dispatch_source.exists():
+    if not sidecar_header.exists() or not sidecar_source.exists() or not fattn_source.exists() or not dispatch_source.exists() or not kv_cache_source.exists():
         return False
 
     fattn_text = fattn_source.read_text(encoding="utf-8")
     dispatch_text = dispatch_source.read_text(encoding="utf-8")
-    return "ggml_cuda_flash_attn_ext_openturbo" in fattn_text and "OpenTurbo packed flash-attn" in dispatch_text
+    kv_cache_text = kv_cache_source.read_text(encoding="utf-8")
+    return (
+        "ggml_cuda_flash_attn_ext_openturbo" in fattn_text
+        and "OpenTurbo packed flash-attn" in dispatch_text
+        and "openturbo_sync_k_sidecars" in kv_cache_text
+    )
+
+
+def resolve_packed_score_patch_files(patch_path: Path | None = None) -> tuple[Path, ...]:
+    if patch_path is None:
+        return tuple(path.resolve() for path in DEFAULT_PACKED_SCORE_PATCHES)
+
+    resolved = patch_path.resolve()
+    if resolved.is_dir():
+        return tuple((resolved / path.name).resolve() for path in DEFAULT_PACKED_SCORE_PATCHES)
+
+    return (resolved,)
 
 
 def apply_packed_score_patch(llama_root: Path, patch_path: Path | None = None) -> bool:
-    patch_file = (patch_path or DEFAULT_PACKED_SCORE_PATCH).resolve()
     if packed_score_patch_present(llama_root):
         return False
 
-    if not patch_file.exists():
-        raise FileNotFoundError(f"Packed score patch bundle is missing: {patch_file}")
+    patch_files = resolve_packed_score_patch_files(patch_path)
+    for patch_file in patch_files:
+        if not patch_file.exists():
+            raise FileNotFoundError(f"Packed score patch bundle is missing: {patch_file}")
 
-    subprocess.run([
-        "git",
-        "-C",
-        str(llama_root),
-        "apply",
-        "--whitespace=nowarn",
-        str(patch_file),
-    ], check=True)
+        subprocess.run([
+            "git",
+            "-C",
+            str(llama_root),
+            "apply",
+            "--whitespace=nowarn",
+            str(patch_file),
+        ], check=True)
     return True
 
 

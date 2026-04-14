@@ -182,7 +182,8 @@ Local validation currently includes:
 GitHub Actions currently does the following:
 
 * Ubuntu and hosted Windows jobs run Python/package validation with `OPENTURBO_BUILD_CUDA=OFF`.
-* The real Windows CUDA build is available only through manual `workflow_dispatch` on a self-hosted runner labeled `self-hosted`, `windows`, `x64`, and `cuda`.
+* A manual self-hosted Windows CUDA job builds the editable CUDA bindings on a runner labeled `self-hosted`, `windows`, `x64`, and `cuda`.
+* A separate manual self-hosted Windows CUDA probe job runs the full downstream llama.cpp probe workflow from a fresh checkout path, including downstream patch application, configure, build, model download, and runtime probe execution.
 
 That split is intentional: hosted runners are used for portable package validation, while actual CUDA builds are reserved for environments that already have a working CUDA toolchain and GPU path.
 
@@ -221,7 +222,7 @@ That single script will:
 1. Bootstrap or reuse a local llama.cpp checkout.
 2. Generate the OpenTurbo scaffold.
 3. Apply the experimental `cpy_k()` probe patch and the eval-callback shadow encode patch.
-4. Apply the tracked `ggml-cuda` packed-score-path patch bundle from `patches/llama_cpp/ggml_cuda_packed_score_path.patch` when the packed path is enabled.
+4. Apply the tracked `ggml-cuda` packed-score-path patch set from `patches/llama_cpp/sidecar_core.patch`, `patches/llama_cpp/fattn_injection.patch`, and `patches/llama_cpp/llama_hooks.patch` when the packed path is enabled.
 5. Reuse the current OpenTurbo CUDA bindings when they already import cleanly, or rebuild them on demand when `--force-bindings-refresh` is passed.
 6. Configure and build a probe-enabled downstream tree.
 7. Download the default `Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf` model.
@@ -243,7 +244,7 @@ The experimental packed-score-path is now enabled by default in the probe runner
 
 When left enabled, the runner configures the downstream `OPENTURBO_EXPERIMENTAL_PACKED_SCORE_PATH` compile definition and emits a `shadow_packed_path` status line whenever the score path has enough information to attempt a packed attention-score swap.
 
-The downstream `ggml-cuda` changes for that path are now source-controlled under `patches/llama_cpp/ggml_cuda_packed_score_path.patch` and applied automatically by the scaffold and probe scripts. The ignored `build/` tree is no longer the only copy of those edits.
+The downstream `ggml-cuda` changes for that path are now source-controlled as an ordered patch set under `patches/llama_cpp/` and applied automatically by the scaffold and probe scripts. The ignored `build/` tree is no longer the only copy of those edits.
 
 If you need to force a local CUDA binding rebuild before the probe run, use:
 
@@ -321,6 +322,7 @@ The repo is currently validated at three levels:
 
 * Python tests via `pytest`, including scaffold generation, downstream patch idempotency, and probe-output parsing.
 * Native CUDA smoke coverage via `build\c_api_smoke_test.exe`.
+* Windows CUDA environment gating via `scripts\check_env.py`, which validates the VS 2022 toolchain, `nvcc`, toolkit root, and optional Ninja path before the self-hosted CUDA jobs proceed.
 * Downstream llama.cpp execution via `scripts\run_llama_cpp_k_cache_probe.py`, which now requires all eight runtime lines:
 	* `cpy_k probe`
 	* `shadow_encode`
@@ -331,6 +333,8 @@ The repo is currently validated at three levels:
 	* `shadow_components`
 	* `shadow_legacy`
 * Optional benchmark output via `benchmarks/llama31_shadow_benchmark.md` when the probe runner is invoked with `--benchmark`.
+
+Passing the unit tests is necessary but not sufficient to claim that a fresh 4090 user can clone the repo and succeed end-to-end. The unit tests cover script behavior, patch idempotency, and probe-output parsing, but they do not prove a clean Windows CUDA toolchain, fresh downstream patch application, or real llama.cpp runtime execution on a 4090. The strongest check for that scenario is the self-hosted Windows CUDA probe workflow or an equivalent local clean-room run of `scripts/run_llama_cpp_k_cache_probe.py --force-bindings-refresh --ngl 999`.
 
 For the current Windows-first downstream workflow, the most useful operator loop is:
 
