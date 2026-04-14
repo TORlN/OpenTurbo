@@ -159,6 +159,7 @@ index 3113de017..11c96f315 100644
 @@ -34,61 +36,56 @@
  #include "ggml-cuda/opt-step-sgd.cuh"
  #include "ggml-cuda/out-prod.cuh"
++#include "ggml-cuda/openturbo-sidecar.cuh"
  #include "ggml-cuda/pad.cuh"
 +#include "ggml-cuda/pad_reflect_1d.cuh"
  #include "ggml-cuda/pool2d.cuh"

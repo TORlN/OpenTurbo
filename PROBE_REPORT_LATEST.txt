@@ -1,0 +1,15 @@
+OpenTurbo Probe Executive Summary
+
+| Metric              | Value     | Status     |
+|---------------------|-----------|------------|
+| Token Top-Match     | 100%      | PERFECT    |
+| Signal Retention    | 90.92%    | CHECK      |
+| SNR (Signal/Noise)  | 10.01 dB  | NOISY      |
+| Scale Ratio         | 1.111x    | CLOSE      |
+| VRAM Compression    | ~72%      | TARGET     |
+
+GPU: RTX 4090
+Model: Llama-3.1-8B
+Timestamp: 2026-04-14 09:11:39 UTC
+Benchmark Markdown: A:\OpenTurbo\benchmarks\llama31_shadow_benchmark.md
+Saved Report: A:\OpenTurbo\PROBE_REPORT_LATEST.txt
