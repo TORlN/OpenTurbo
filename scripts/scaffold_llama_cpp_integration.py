@@ -8,6 +8,7 @@ from pathlib import Path
 
 DEFAULT_LLAMA_CPP_URL = "https://github.com/ggml-org/llama.cpp.git"
 DEFAULT_LLAMA_DIR_NAME = "llama"
+DEFAULT_PACKED_SCORE_PATCH = Path(__file__).resolve().parent.parent / "patches" / "llama_cpp" / "ggml_cuda_packed_score_path.patch"
 
 
 BRIDGE_HEADER = """#pragma once
@@ -206,6 +207,8 @@ Probe automation:
 2. Configure llama.cpp with `-DOPENTURBO_EXPERIMENTAL_K_CACHE_PROBE=ON`.
 3. If OpenTurbo is not adjacent to the checkout, also pass `-DOPENTURBO_ROOT=<path-to-openturbo>`.
 4. Build and run one narrow inference path to capture the one-time `cpy_k` probe log line.
+
+The tracked `ggml-cuda` packed-score-path integration now lives in `patches/llama_cpp/ggml_cuda_packed_score_path.patch` and can be applied with `--packed-score-path`.
 
 The probe patching logic targets the current llama.cpp `llama_kv_cache::cpy_k()` layout and fails fast if the expected insertion points are not present.
 """
@@ -1897,6 +1900,39 @@ def apply_shadow_encode_patch(llama_root: Path, output_root: Path) -> bool:
     return changed_cmake or changed_source
 
 
+def packed_score_patch_present(llama_root: Path) -> bool:
+    sidecar_header = llama_root / "ggml" / "src" / "ggml-cuda" / "openturbo-sidecar.cuh"
+    sidecar_source = llama_root / "ggml" / "src" / "ggml-cuda" / "openturbo-sidecar.cu"
+    fattn_source = llama_root / "ggml" / "src" / "ggml-cuda" / "fattn.cu"
+    dispatch_source = llama_root / "ggml" / "src" / "ggml-cuda" / "ggml-cuda.cu"
+
+    if not sidecar_header.exists() or not sidecar_source.exists() or not fattn_source.exists() or not dispatch_source.exists():
+        return False
+
+    fattn_text = fattn_source.read_text(encoding="utf-8")
+    dispatch_text = dispatch_source.read_text(encoding="utf-8")
+    return "ggml_cuda_flash_attn_ext_openturbo" in fattn_text and "OpenTurbo packed flash-attn" in dispatch_text
+
+
+def apply_packed_score_patch(llama_root: Path, patch_path: Path | None = None) -> bool:
+    patch_file = (patch_path or DEFAULT_PACKED_SCORE_PATCH).resolve()
+    if packed_score_patch_present(llama_root):
+        return False
+
+    if not patch_file.exists():
+        raise FileNotFoundError(f"Packed score patch bundle is missing: {patch_file}")
+
+    subprocess.run([
+        "git",
+        "-C",
+        str(llama_root),
+        "apply",
+        "--whitespace=nowarn",
+        str(patch_file),
+    ], check=True)
+    return True
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate an OpenTurbo integration scaffold inside a llama.cpp checkout.")
     parser.add_argument("llama_root", nargs="?", type=Path, help="Optional path to an existing llama.cpp checkout or a destination to clone into.")
@@ -1908,6 +1944,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-subdir", default="examples/openturbo", help="Subdirectory inside llama_root where the scaffold files will be written.")
     parser.add_argument("--probe-k-cache", action="store_true", help="Patch the downstream llama.cpp checkout with the experimental cpy_k probe flow.")
     parser.add_argument("--shadow-encode", action="store_true", help="Patch the downstream eval-callback example with an execution-time OpenTurbo shadow encode callback.")
+    parser.add_argument("--packed-score-path", action="store_true", help="Apply the tracked ggml-cuda packed-score-path patch bundle inside the downstream llama.cpp checkout.")
     parser.add_argument("--force", action="store_true", help="Overwrite existing generated files.")
     return parser
 
@@ -1957,6 +1994,7 @@ def main() -> int:
 
     patched_probe = False
     patched_shadow_encode = False
+    patched_packed_score = False
     if args.probe_k_cache:
         if llama_root is None:
             raise ValueError("--probe-k-cache requires a llama_root path or --llama-root.")
@@ -1966,6 +2004,11 @@ def main() -> int:
         if llama_root is None:
             raise ValueError("--shadow-encode requires a llama_root path or --llama-root.")
         patched_shadow_encode = apply_shadow_encode_patch(llama_root, output_root)
+
+    if args.packed_score_path:
+        if llama_root is None:
+            raise ValueError("--packed-score-path requires a llama_root path or --llama-root.")
+        patched_packed_score = apply_packed_score_patch(llama_root)
 
     print(f"Generated OpenTurbo llama.cpp scaffold in: {output_root}")
     if args.probe_k_cache:
@@ -1978,6 +2021,11 @@ def main() -> int:
             print(f"Applied experimental shadow-encode patch in: {llama_root}")
         else:
             print(f"Experimental shadow-encode patch already present in: {llama_root}")
+    if args.packed_score_path:
+        if patched_packed_score:
+            print(f"Applied tracked ggml-cuda packed-score-path patch in: {llama_root}")
+        else:
+            print(f"Tracked ggml-cuda packed-score-path patch already present in: {llama_root}")
     return 0
 
 

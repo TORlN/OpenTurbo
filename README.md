@@ -221,10 +221,11 @@ That single script will:
 1. Bootstrap or reuse a local llama.cpp checkout.
 2. Generate the OpenTurbo scaffold.
 3. Apply the experimental `cpy_k()` probe patch and the eval-callback shadow encode patch.
-4. Reuse the current OpenTurbo CUDA bindings when they already import cleanly, or rebuild them on demand when `--force-bindings-refresh` is passed.
-5. Configure and build a probe-enabled downstream tree.
-6. Download the default `Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf` model.
-7. Run `llama-eval-callback` and print the probe diagnostics, including `cpy_k probe`, `shadow_encode`, `shadow_read`, `shadow_score`, `shadow_compare`, `shadow_snr`, `shadow_components`, and `shadow_legacy`.
+4. Apply the tracked `ggml-cuda` packed-score-path patch bundle from `patches/llama_cpp/ggml_cuda_packed_score_path.patch` when the packed path is enabled.
+5. Reuse the current OpenTurbo CUDA bindings when they already import cleanly, or rebuild them on demand when `--force-bindings-refresh` is passed.
+6. Configure and build a probe-enabled downstream tree.
+7. Download the default `Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf` model.
+8. Run `llama-eval-callback` and print the probe diagnostics, including `cpy_k probe`, `shadow_encode`, `shadow_read`, `shadow_score`, `shadow_compare`, `shadow_snr`, `shadow_components`, and `shadow_legacy`.
 
 If you want a benchmark table across multiple prompts and deeper layers instead of one first-layer sample:
 
@@ -241,6 +242,8 @@ The experimental packed-score-path is now enabled by default in the probe runner
 ```
 
 When left enabled, the runner configures the downstream `OPENTURBO_EXPERIMENTAL_PACKED_SCORE_PATH` compile definition and emits a `shadow_packed_path` status line whenever the score path has enough information to attempt a packed attention-score swap.
+
+The downstream `ggml-cuda` changes for that path are now source-controlled under `patches/llama_cpp/ggml_cuda_packed_score_path.patch` and applied automatically by the scaffold and probe scripts. The ignored `build/` tree is no longer the only copy of those edits.
 
 If you need to force a local CUDA binding rebuild before the probe run, use:
 
@@ -288,6 +291,12 @@ If you also want the execution-time shadow encode and sidecar read probe patch i
 
 ```powershell
 .venv\Scripts\python.exe scripts\scaffold_llama_cpp_integration.py --bootstrap --probe-k-cache --shadow-encode
+```
+
+If you also want the tracked `ggml-cuda` packed-score-path modifications applied into the downstream checkout without relying on the ignored `build/` tree:
+
+```powershell
+.venv\Scripts\python.exe scripts\scaffold_llama_cpp_integration.py --bootstrap --probe-k-cache --shadow-encode --packed-score-path
 ```
 
 That patch set does two additional things during downstream execution:

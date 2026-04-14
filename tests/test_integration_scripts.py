@@ -156,6 +156,41 @@ def test_apply_shadow_encode_patch_is_idempotent_and_preserves_cmake_vars(tmp_pa
     assert source_text.count("openturbo_shadow_eval_callback.hpp") == 1
 
 
+def test_apply_packed_score_patch_invokes_tracked_patch_bundle(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    ggml_cuda_root = tmp_path / "ggml" / "src" / "ggml-cuda"
+    ggml_cuda_root.mkdir(parents=True)
+    (ggml_cuda_root / "fattn.cu").write_text("void placeholder() {}\n", encoding="utf-8")
+    (ggml_cuda_root / "ggml-cuda.cu").write_text("void placeholder_dispatch() {}\n", encoding="utf-8")
+
+    patch_file = tmp_path / "ggml_cuda_packed_score_path.patch"
+    patch_file.write_text("diff --git a/foo b/foo\n", encoding="utf-8")
+
+    recorded: list[list[str]] = []
+
+    def fake_run(command: list[str], check: bool) -> None:
+        recorded.append(command)
+
+    monkeypatch.setattr(scaffold.subprocess, "run", fake_run)
+
+    changed = scaffold.apply_packed_score_patch(tmp_path, patch_file)
+
+    assert changed is True
+    assert recorded == [["git", "-C", str(tmp_path), "apply", "--whitespace=nowarn", str(patch_file.resolve())]]
+
+
+def test_apply_packed_score_patch_is_idempotent_when_markers_exist(tmp_path: Path) -> None:
+    ggml_cuda_root = tmp_path / "ggml" / "src" / "ggml-cuda"
+    ggml_cuda_root.mkdir(parents=True)
+    (ggml_cuda_root / "openturbo-sidecar.cuh").write_text("#pragma once\n", encoding="utf-8")
+    (ggml_cuda_root / "openturbo-sidecar.cu").write_text("void sidecar() {}\n", encoding="utf-8")
+    (ggml_cuda_root / "fattn.cu").write_text("bool ggml_cuda_flash_attn_ext_openturbo_supported(const ggml_tensor * dst) { return dst != nullptr; }\n", encoding="utf-8")
+    (ggml_cuda_root / "ggml-cuda.cu").write_text('GGML_LOG_INFO("%s: OpenTurbo packed flash-attn path active\\n", __func__);\n', encoding="utf-8")
+
+    changed = scaffold.apply_packed_score_patch(tmp_path, tmp_path / "missing.patch")
+
+    assert changed is False
+
+
 def test_parse_probe_output_requires_both_lines() -> None:
     output = "\n".join(
         [
@@ -342,3 +377,9 @@ def test_probe_runner_parser_exposes_force_bindings_refresh_flag() -> None:
     args = probe_runner.build_arg_parser().parse_args(["--force-bindings-refresh"])
 
     assert args.force_bindings_refresh is True
+
+
+def test_probe_runner_parser_keeps_packed_score_path_enabled_by_default() -> None:
+    args = probe_runner.build_arg_parser().parse_args([])
+
+    assert args.packed_score_path is True

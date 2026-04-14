@@ -11,6 +11,7 @@ import urllib.request
 from pathlib import Path
 
 from scaffold_llama_cpp_integration import apply_probe_patch
+from scaffold_llama_cpp_integration import apply_packed_score_patch
 from scaffold_llama_cpp_integration import apply_shadow_encode_patch
 from scaffold_llama_cpp_integration import ensure_llama_root_exists
 from scaffold_llama_cpp_integration import resolve_output_root
@@ -539,6 +540,8 @@ def main() -> int:
     generate_scaffold(output_root, not args.no_force)
     apply_probe_patch(llama_root, output_root)
     apply_shadow_encode_patch(llama_root, output_root)
+    if args.packed_score_path:
+        apply_packed_score_patch(llama_root)
     enable_cuda = args.packed_score_path or args.ngl != "0"
     configure_probe_build(cmake_exe, llama_root, build_dir, args.config, openturbo_root, args.packed_score_path, enable_cuda)
     build_probe_target(cmake_exe, build_dir, args.config, args.target)
