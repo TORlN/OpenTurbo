@@ -58,6 +58,18 @@ namespace openturbo
         return values;
     }
 
+    __device__ __forceinline__ LaneValues load_lane_values(
+        const __half *__restrict__ input,
+        int lane_base)
+    {
+        LaneValues values{};
+        values.r0 = __half2float(input[lane_base + 0]);
+        values.r1 = __half2float(input[lane_base + 1]);
+        values.r2 = __half2float(input[lane_base + 2]);
+        values.r3 = __half2float(input[lane_base + 3]);
+        return values;
+    }
+
     __device__ __forceinline__ void apply_rope_to_lane(
         LaneValues &values,
         int lane_id,
@@ -93,6 +105,14 @@ namespace openturbo
         local_abs_max = fmaxf(local_abs_max, fabsf(values.r2));
         local_abs_max = fmaxf(local_abs_max, fabsf(values.r3));
         return local_abs_max;
+    }
+
+    __device__ __forceinline__ float lane_sq_sum(const LaneValues &values)
+    {
+        return values.r0 * values.r0 +
+               values.r1 * values.r1 +
+               values.r2 * values.r2 +
+               values.r3 * values.r3;
     }
 
     __device__ __forceinline__ LaneQuantization quantize_lane_pairs(
@@ -158,9 +178,9 @@ namespace openturbo
         return scale_bits | (alpha_bits << 16);
     }
 
-    template <bool ApplyRope>
+    template <bool ApplyRope, typename InputType>
     __global__ void encode_tile_fused_kernel(
-        const float *__restrict__ input,
+        const InputType *__restrict__ input,
         PackedTileHeader *__restrict__ output_headers,
         int num_tiles,
         int token_pos,
@@ -184,11 +204,18 @@ namespace openturbo
         apply_fwht_to_lane(values, lane_id);
 
         const float local_abs_max = lane_abs_max(values);
+        const float local_sq_sum = lane_sq_sum(values);
 
         float tile_abs_max = warp_reduce_max(local_abs_max);
         tile_abs_max = __shfl_sync(kWarpMask, tile_abs_max, 0);
 
-        const float block_scale = tile_abs_max * kBlockScaleCalibration;
+        float tile_sq_sum = warp_reduce_sum(local_sq_sum);
+        tile_sq_sum = __shfl_sync(kWarpMask, tile_sq_sum, 0);
+
+        const float tile_rms = sqrtf(tile_sq_sum * (1.0f / static_cast<float>(kTileDims)));
+
+        const float calibrated_abs_max = tile_abs_max * kBlockScaleCalibration;
+        const float block_scale = damp_block_scale(calibrated_abs_max, tile_rms);
 
         const LaneQuantization quantized = quantize_lane_pairs(values, block_scale);
 
@@ -248,7 +275,7 @@ namespace openturbo
         }
 
         const int blocks = (num_tiles + kWarpsPerBlock - 1) / kWarpsPerBlock;
-        encode_tile_fused_kernel<true><<<blocks, kThreadsPerBlock, 0, stream>>>(
+        encode_tile_fused_kernel<true, float><<<blocks, kThreadsPerBlock, 0, stream>>>(
             input,
             output_headers,
             num_tiles,
@@ -269,7 +296,51 @@ namespace openturbo
         }
 
         const int blocks = (num_tiles + kWarpsPerBlock - 1) / kWarpsPerBlock;
-        encode_tile_fused_kernel<false><<<blocks, kThreadsPerBlock, 0, stream>>>(
+        encode_tile_fused_kernel<false, float><<<blocks, kThreadsPerBlock, 0, stream>>>(
+            input,
+            output_headers,
+            num_tiles,
+            0,
+            0.0f);
+        return cudaGetLastError();
+    }
+
+    cudaError_t launch_encode_tile_fused(
+        const __half *input,
+        PackedTileHeader *output_headers,
+        int num_tiles,
+        int token_pos,
+        float rope_theta,
+        cudaStream_t stream)
+    {
+        if (num_tiles <= 0)
+        {
+            return cudaSuccess;
+        }
+
+        const int blocks = (num_tiles + kWarpsPerBlock - 1) / kWarpsPerBlock;
+        encode_tile_fused_kernel<true, __half><<<blocks, kThreadsPerBlock, 0, stream>>>(
+            input,
+            output_headers,
+            num_tiles,
+            token_pos,
+            rope_theta);
+        return cudaGetLastError();
+    }
+
+    cudaError_t launch_encode_tile_fused_prerotated(
+        const __half *input,
+        PackedTileHeader *output_headers,
+        int num_tiles,
+        cudaStream_t stream)
+    {
+        if (num_tiles <= 0)
+        {
+            return cudaSuccess;
+        }
+
+        const int blocks = (num_tiles + kWarpsPerBlock - 1) / kWarpsPerBlock;
+        encode_tile_fused_kernel<false, __half><<<blocks, kThreadsPerBlock, 0, stream>>>(
             input,
             output_headers,
             num_tiles,

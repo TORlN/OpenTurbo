@@ -211,7 +211,15 @@ def generate_scaffold(output_root: Path, force: bool) -> None:
     write_text_file(output_root / "openturbo_shadow_eval_callback.cpp", SHADOW_CALLBACK_CPP, force)
 
 
-def configure_probe_build(cmake_exe: str, llama_root: Path, build_dir: Path, config: str, openturbo_root: Path, packed_score_path: bool) -> None:
+def configure_probe_build(
+    cmake_exe: str,
+    llama_root: Path,
+    build_dir: Path,
+    config: str,
+    openturbo_root: Path,
+    packed_score_path: bool,
+    enable_cuda: bool,
+) -> None:
     run_command(
         [
             cmake_exe,
@@ -219,6 +227,7 @@ def configure_probe_build(cmake_exe: str, llama_root: Path, build_dir: Path, con
             str(llama_root),
             "-B",
             str(build_dir),
+            f"-DGGML_CUDA={'ON' if enable_cuda else 'OFF'}",
             f"-DOPENTURBO_EXPERIMENTAL_K_CACHE_PROBE=ON",
             f"-DOPENTURBO_EXPERIMENTAL_K_CACHE_SHADOW_ENCODE=ON",
             f"-DOPENTURBO_EXPERIMENTAL_PACKED_SCORE_PATH={'ON' if packed_score_path else 'OFF'}",
@@ -445,7 +454,8 @@ def main() -> int:
     generate_scaffold(output_root, not args.no_force)
     apply_probe_patch(llama_root, output_root)
     apply_shadow_encode_patch(llama_root, output_root)
-    configure_probe_build(cmake_exe, llama_root, build_dir, args.config, openturbo_root, args.packed_score_path)
+    enable_cuda = args.packed_score_path or args.ngl != "0"
+    configure_probe_build(cmake_exe, llama_root, build_dir, args.config, openturbo_root, args.packed_score_path, enable_cuda)
     build_probe_target(cmake_exe, build_dir, args.config, args.target)
     runner = resolve_runner(build_dir, args.config, args.target)
     if args.model is not None:

@@ -13,6 +13,8 @@ namespace openturbo
     constexpr float kInvSqrt2 = 0.7071067811865475f;
     constexpr float kBoxCenterCoord = 0.5f;
     constexpr float kBlockScaleCalibration = 0.875f;
+    constexpr float kBlockScaleRmsCap = 3.25f;
+    constexpr float kBlockScaleOvershootBlend = 0.25f;
 
     struct alignas(32) PackedTileHeader
     {
@@ -37,6 +39,22 @@ namespace openturbo
     __host__ __device__ __forceinline__ uint32_t encode_quadrant_code(float x, float y)
     {
         return (sign_bit_from_value(x) << 1) | sign_bit_from_value(y);
+    }
+
+    __host__ __device__ __forceinline__ float damp_block_scale(float calibrated_abs_max, float tile_rms)
+    {
+        if (!(calibrated_abs_max > 0.0f) || !(tile_rms > 0.0f))
+        {
+            return calibrated_abs_max;
+        }
+
+        const float rms_cap = tile_rms * kBlockScaleRmsCap;
+        if (!(rms_cap > 0.0f) || calibrated_abs_max <= rms_cap)
+        {
+            return calibrated_abs_max;
+        }
+
+        return rms_cap + (calibrated_abs_max - rms_cap) * kBlockScaleOvershootBlend;
     }
 
     __host__ __device__ __forceinline__ float rope_angle(

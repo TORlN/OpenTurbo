@@ -1147,7 +1147,7 @@ openturbo_shadow_score_summary openturbo_run_shadow_score(const ggml_tensor *   
         float best_legacy_score = -INFINITY;
         float total_abs_error = 0.0f;
         float total_fwht_abs_error = 0.0f;
-        float total_fwht_scale_ratio = 0.0f;
+        float total_fwht_log_scale_ratio = 0.0f;
         float total_fwht_signal_sq = 0.0f;
         float total_fwht_noise_sq = 0.0f;
         float total_legacy_abs_error = 0.0f;
@@ -1223,8 +1223,10 @@ openturbo_shadow_score_summary openturbo_run_shadow_score(const ggml_tensor *   
             summary.max_abs_error = std::max(summary.max_abs_error, abs_error);
             summary.fwht_max_abs_error = std::max(summary.fwht_max_abs_error, fwht_abs_error);
             summary.legacy_max_abs_error = std::max(summary.legacy_max_abs_error, legacy_abs_error);
-            if (std::fabs(mean_fwht_score) > 1.0e-6f) {
-                total_fwht_scale_ratio += mean_score / mean_fwht_score;
+            if (std::fabs(mean_score) > 1.0e-6f && std::fabs(mean_fwht_score) > 1.0e-6f) {
+                float scale_ratio = std::fabs(mean_score) / std::fabs(mean_fwht_score);
+                scale_ratio = std::clamp(scale_ratio, 1.0f / 8.0f, 8.0f);
+                total_fwht_log_scale_ratio += std::log(scale_ratio);
                 ++fwht_scale_ratio_count;
             }
 
@@ -1262,7 +1264,9 @@ openturbo_shadow_score_summary openturbo_run_shadow_score(const ggml_tensor *   
         summary.top_match = summary.top_row == summary.dense_top_row ? 1 : 0;
         summary.fwht_mean_abs_error = total_fwht_abs_error / static_cast<float>(active_rows.size());
         summary.fwht_top_match = summary.top_row == summary.fwht_top_row ? 1 : 0;
-        summary.fwht_mean_scale_ratio = fwht_scale_ratio_count > 0 ? total_fwht_scale_ratio / static_cast<float>(fwht_scale_ratio_count) : 0.0f;
+        summary.fwht_mean_scale_ratio = fwht_scale_ratio_count > 0
+            ? std::exp(total_fwht_log_scale_ratio / static_cast<float>(fwht_scale_ratio_count))
+            : 0.0f;
         summary.fwht_signal_power = total_fwht_signal_sq / static_cast<float>(active_rows.size());
         summary.fwht_noise_power = total_fwht_noise_sq / static_cast<float>(active_rows.size());
         summary.fwht_snr_db = openturbo_compute_snr_db(summary.fwht_signal_power, summary.fwht_noise_power);

@@ -61,7 +61,15 @@ namespace openturbo
         {
             fields.block_scale = std::fmax(fields.block_scale, std::fabs(transformed[i]));
         }
-        fields.block_scale *= kBlockScaleCalibration;
+        float tile_sq_sum = 0.0f;
+        for (int i = 0; i < kTileDims; ++i)
+        {
+            tile_sq_sum += transformed[i] * transformed[i];
+        }
+
+        const float calibrated_abs_max = fields.block_scale * kBlockScaleCalibration;
+        const float tile_rms = std::sqrt(tile_sq_sum / static_cast<float>(kTileDims));
+        fields.block_scale = damp_block_scale(calibrated_abs_max, tile_rms);
 
         float alpha_sum = 0.0f;
         for (int pair_index = 0; pair_index < kPairsPerTile; ++pair_index)
