@@ -223,11 +223,13 @@ CMAKE_FRAGMENT = """# Add this source inside the downstream llama.cpp build afte
 
 SHADOW_CALLBACK_HEADER = """#pragma once
 
+#include <cstdint>
+
 #include \"ggml-backend.h\"
 
 struct openturbo_shadow_eval_callback_state {
-    bool logged_write_once = false;
-    bool logged_read_once = false;
+    uint8_t logged_write_layers[256] = {};
+    uint8_t logged_read_layers[256] = {};
     bool logged_error = false;
 };
 
@@ -244,6 +246,7 @@ SHADOW_CALLBACK_CPP = """#include \"openturbo_shadow_eval_callback.hpp\"
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -251,6 +254,8 @@ SHADOW_CALLBACK_CPP = """#include \"openturbo_shadow_eval_callback.hpp\"
 #include <vector>
 
 namespace {
+constexpr int kOpenturboMaxTrackedLayers = 256;
+
 struct openturbo_shadow_layer_sidecar {
     int64_t row_capacity = 0;
     int64_t tiles_per_row = 0;
@@ -259,6 +264,75 @@ struct openturbo_shadow_layer_sidecar {
 };
 
 std::unordered_map<int, openturbo_shadow_layer_sidecar> g_openturbo_shadow_sidecars;
+
+struct openturbo_layer_filter_config {
+    bool initialized = false;
+    bool allow_all = false;
+    uint8_t enabled_layers[kOpenturboMaxTrackedLayers] = {};
+};
+
+bool openturbo_is_valid_tracked_layer(int layer_index) {
+    return layer_index >= 0 && layer_index < kOpenturboMaxTrackedLayers;
+}
+
+bool openturbo_state_layer_logged(const uint8_t * flags, int layer_index) {
+    return openturbo_is_valid_tracked_layer(layer_index) && flags[layer_index] != 0;
+}
+
+void openturbo_state_mark_layer_logged(uint8_t * flags, int layer_index) {
+    if (openturbo_is_valid_tracked_layer(layer_index)) {
+        flags[layer_index] = 1;
+    }
+}
+
+const ggml_tensor * openturbo_find_named_cache_tensor(const ggml_tensor * tensor, int depth_remaining);
+const ggml_tensor * openturbo_find_kq_mask_tensor(const ggml_tensor * tensor, int depth_remaining);
+
+openturbo_layer_filter_config & openturbo_get_layer_filter_config() {
+    static openturbo_layer_filter_config config;
+    if (config.initialized) {
+        return config;
+    }
+
+    config.initialized = true;
+    const char * layer_filter = std::getenv("OPENTURBO_SHADOW_LAYER_FILTER");
+    if (layer_filter == nullptr || layer_filter[0] == '\\0') {
+        config.enabled_layers[0] = 1;
+        return config;
+    }
+
+    if (std::strcmp(layer_filter, "all") == 0) {
+        config.allow_all = true;
+        return config;
+    }
+
+    const char * cursor = layer_filter;
+    while (*cursor != '\\0') {
+        char * end_ptr = nullptr;
+        const long value = std::strtol(cursor, &end_ptr, 10);
+        if (end_ptr != cursor && value >= 0 && value < kOpenturboMaxTrackedLayers) {
+            config.enabled_layers[value] = 1;
+            cursor = end_ptr;
+        } else {
+            ++cursor;
+        }
+
+        while (*cursor == ',' || *cursor == ' ' || *cursor == ';') {
+            ++cursor;
+        }
+    }
+
+    return config;
+}
+
+bool openturbo_should_track_layer(int layer_index) {
+    if (!openturbo_is_valid_tracked_layer(layer_index)) {
+        return false;
+    }
+
+    const auto & config = openturbo_get_layer_filter_config();
+    return config.allow_all || config.enabled_layers[layer_index] != 0;
+}
 
 bool openturbo_is_shadow_candidate(const ggml_tensor * tensor) {
     if (tensor == nullptr || tensor->op != GGML_OP_SET_ROWS) {
@@ -376,6 +450,27 @@ int openturbo_parse_layer_index(const ggml_tensor * tensor) {
     return layer_index;
 }
 
+int openturbo_shadow_write_layer(const ggml_tensor * tensor) {
+    if (!openturbo_is_shadow_candidate(tensor)) {
+        return -1;
+    }
+
+    return openturbo_parse_layer_index(tensor->src[2]);
+}
+
+int openturbo_shadow_read_layer(const ggml_tensor * tensor) {
+    if (tensor == nullptr || tensor->op == GGML_OP_SET_ROWS) {
+        return -1;
+    }
+
+    const ggml_tensor * cache_tensor = openturbo_find_named_cache_tensor(tensor, 8);
+    if (cache_tensor == nullptr || openturbo_find_kq_mask_tensor(tensor, 8) == nullptr) {
+        return -1;
+    }
+
+    return openturbo_parse_layer_index(cache_tensor);
+}
+
 int64_t openturbo_row_capacity(const ggml_tensor * tensor) {
     if (tensor == nullptr) {
         return 0;
@@ -449,11 +544,11 @@ const ggml_tensor * openturbo_find_named_tensor_prefix(const ggml_tensor * tenso
     return nullptr;
 }
 
-const ggml_tensor * openturbo_find_named_cache_tensor(const ggml_tensor * tensor, int depth_remaining = 8) {
+const ggml_tensor * openturbo_find_named_cache_tensor(const ggml_tensor * tensor, int depth_remaining) {
     return openturbo_find_named_tensor_prefix(tensor, "cache_k_l", 8, depth_remaining);
 }
 
-const ggml_tensor * openturbo_find_kq_mask_tensor(const ggml_tensor * tensor, int depth_remaining = 8) {
+const ggml_tensor * openturbo_find_kq_mask_tensor(const ggml_tensor * tensor, int depth_remaining) {
     return openturbo_find_named_tensor_prefix(tensor, "attn_inp_kq_mask", 16, depth_remaining);
 }
 
@@ -1206,7 +1301,8 @@ bool openturbo_is_read_candidate(const ggml_tensor * tensor) {
         return false;
     }
 
-    return openturbo_find_named_cache_tensor(tensor) != nullptr && openturbo_find_kq_mask_tensor(tensor) != nullptr;
+    return openturbo_find_named_cache_tensor(tensor, 8) != nullptr &&
+           openturbo_find_kq_mask_tensor(tensor, 8) != nullptr;
 }
 }
 
@@ -1214,18 +1310,27 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
     auto * state = static_cast<openturbo_shadow_eval_callback_state *>(user_data);
 
     if (ask) {
-        const bool wants_write = openturbo_is_shadow_candidate(tensor) && (state == nullptr || !state->logged_write_once);
-        const bool wants_read = openturbo_is_read_candidate(tensor) && (state == nullptr || !state->logged_read_once);
+        const int write_layer = openturbo_shadow_write_layer(tensor);
+        const int read_layer = openturbo_shadow_read_layer(tensor);
+        const bool wants_write = openturbo_should_track_layer(write_layer) &&
+            (state == nullptr || !openturbo_state_layer_logged(state->logged_write_layers, write_layer));
+        const bool wants_read = openturbo_should_track_layer(read_layer) &&
+            (state == nullptr || !openturbo_state_layer_logged(state->logged_read_layers, read_layer));
         return wants_write || wants_read;
     }
 
     if (openturbo_is_read_candidate(tensor)) {
-        if (state != nullptr && state->logged_read_once) {
+        const int tracked_layer = openturbo_shadow_read_layer(tensor);
+        if (!openturbo_should_track_layer(tracked_layer)) {
             return true;
         }
 
-        const ggml_tensor * cache_tensor = openturbo_find_named_cache_tensor(tensor);
-        const ggml_tensor * mask_tensor = openturbo_find_kq_mask_tensor(tensor);
+        if (state != nullptr && openturbo_state_layer_logged(state->logged_read_layers, tracked_layer)) {
+            return true;
+        }
+
+        const ggml_tensor * cache_tensor = openturbo_find_named_cache_tensor(tensor, 8);
+        const ggml_tensor * mask_tensor = openturbo_find_kq_mask_tensor(tensor, 8);
         const int layer_index = openturbo_parse_layer_index(cache_tensor);
         const auto sidecar_it = g_openturbo_shadow_sidecars.find(layer_index);
         if (sidecar_it == g_openturbo_shadow_sidecars.end()) {
@@ -1234,7 +1339,7 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
                          layer_index,
                          ggml_get_name(tensor));
             if (state != nullptr) {
-                state->logged_read_once = true;
+                openturbo_state_mark_layer_logged(state->logged_read_layers, layer_index);
                 state->logged_error = true;
             }
             return true;
@@ -1249,7 +1354,7 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
                          ggml_get_name(tensor),
                          mask_tensor == nullptr ? -1 : static_cast<int>(mask_tensor->type));
             if (state != nullptr) {
-                state->logged_read_once = true;
+                openturbo_state_mark_layer_logged(state->logged_read_layers, layer_index);
                 state->logged_error = true;
             }
             return true;
@@ -1321,6 +1426,16 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
                              score_summary.component_first_residual,
                              score_summary.component_mean_main,
                              score_summary.component_mean_residual);
+#ifdef OPENTURBO_EXPERIMENTAL_PACKED_SCORE_PATH
+                std::fprintf(stderr,
+                             "[openturbo] shadow_packed_path layer=%d status=prepared node=%s active_rows=%d shadow_top_row=%lld shadow_top=%.6f fwht_top_match=%d\\n",
+                             layer_index,
+                             ggml_get_name(tensor),
+                             score_summary.active_rows,
+                             static_cast<long long>(score_summary.top_row),
+                             score_summary.top_score,
+                             score_summary.fwht_top_match);
+#endif
                 std::fprintf(stderr,
                              "[openturbo] shadow_legacy layer=%d status=success node=%s corner_top_match=%d corner_first=%.6f corner_top_row=%lld corner_top=%.6f corner_mae=%.6f corner_max_abs_error=%.6f\\n",
                              layer_index,
@@ -1352,6 +1467,13 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
                              layer_index,
                              score_summary.reason,
                              ggml_get_name(tensor));
+#ifdef OPENTURBO_EXPERIMENTAL_PACKED_SCORE_PATH
+                std::fprintf(stderr,
+                             "[openturbo] shadow_packed_path layer=%d status=%s node=%s\\n",
+                             layer_index,
+                             score_summary.reason,
+                             ggml_get_name(tensor));
+#endif
                 std::fprintf(stderr,
                              "[openturbo] shadow_legacy layer=%d status=%s node=%s\\n",
                              layer_index,
@@ -1360,7 +1482,7 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
             }
         }
         if (state != nullptr) {
-            state->logged_read_once = true;
+            openturbo_state_mark_layer_logged(state->logged_read_layers, layer_index);
         }
         return true;
     }
@@ -1369,7 +1491,12 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
         return true;
     }
 
-    if (state != nullptr && state->logged_write_once) {
+    const int tracked_layer = openturbo_shadow_write_layer(tensor);
+    if (!openturbo_should_track_layer(tracked_layer)) {
+        return true;
+    }
+
+    if (state != nullptr && openturbo_state_layer_logged(state->logged_write_layers, tracked_layer)) {
         return true;
     }
 
@@ -1497,7 +1624,7 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
                      ggml_get_name(dst_cache),
                      static_cast<unsigned long long>(first_header.quadrant_word_0));
         if (state != nullptr) {
-            state->logged_write_once = true;
+            openturbo_state_mark_layer_logged(state->logged_write_layers, layer_index);
         }
         return true;
     }
@@ -1517,6 +1644,7 @@ bool openturbo_shadow_cb_eval(struct ggml_tensor * tensor, bool ask, void * user
 
 
 PROBE_OPTION_BLOCK = """option(OPENTURBO_EXPERIMENTAL_K_CACHE_PROBE \"llama: enable OpenTurbo K-cache probe logging\" OFF)
+option(OPENTURBO_EXPERIMENTAL_PACKED_SCORE_PATH \"llama: prepare packed score path plumbing in the eval callback example\" OFF)
 set(OPENTURBO_ROOT \"\" CACHE PATH \"Path to the OpenTurbo workspace or install prefix\")
 
 """
@@ -1592,6 +1720,9 @@ if (OPENTURBO_EXPERIMENTAL_K_CACHE_SHADOW_ENCODE)
     target_include_directories(${{TARGET}} PRIVATE {shadow_dir_rel} "${{OPENTURBO_ROOT}}/include")
     target_link_libraries(${{TARGET}} PRIVATE "${{OPENTURBO_C_API_LIBRARY}}" CUDA::cudart)
     target_compile_definitions(${{TARGET}} PRIVATE OPENTURBO_EXPERIMENTAL_K_CACHE_SHADOW_ENCODE)
+    if (OPENTURBO_EXPERIMENTAL_PACKED_SCORE_PATH)
+        target_compile_definitions(${{TARGET}} PRIVATE OPENTURBO_EXPERIMENTAL_PACKED_SCORE_PATH)
+    endif()
     add_custom_command(TARGET ${{TARGET}} POST_BUILD
         COMMAND ${{CMAKE_COMMAND}} -E copy_if_different "${{OPENTURBO_C_API_DLL}}" "$<TARGET_FILE_DIR:${{TARGET}}>")
 endif()

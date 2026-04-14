@@ -116,6 +116,8 @@ def test_generate_scaffold_writes_shadow_and_bridge_files(tmp_path: Path) -> Non
     assert "corner_max_abs_error=%.6f\\n" in shadow_text
     assert "shadow_legacy layer=%d status=%s node=%s\\n" in shadow_text
     assert "query_head_index / query_head_group" in shadow_text
+    assert "OPENTURBO_SHADOW_LAYER_FILTER" in shadow_text
+    assert "shadow_packed_path" in shadow_text
 
 
 def test_apply_probe_patch_is_idempotent(tmp_path: Path) -> None:
@@ -147,6 +149,7 @@ def test_apply_shadow_encode_patch_is_idempotent_and_preserves_cmake_vars(tmp_pa
     cmake_text = eval_cmakelists.read_text(encoding="utf-8")
     source_text = eval_source.read_text(encoding="utf-8")
     assert "OPENTURBO_EXPERIMENTAL_K_CACHE_SHADOW_ENCODE" in cmake_text
+    assert "OPENTURBO_EXPERIMENTAL_PACKED_SCORE_PATH" in cmake_text
     assert "${TARGET}" in cmake_text
     assert "openturbo_shadow_eval_callback.hpp" in source_text
     assert "params.cb_eval = openturbo_shadow_cb_eval;" in source_text
@@ -279,3 +282,36 @@ def test_write_text_file_refuses_overwrite_without_force(tmp_path: Path) -> None
 
     with pytest.raises(FileExistsError):
         scaffold.write_text_file(target, "second", force=False)
+
+
+def test_collect_benchmark_rows_merges_compare_and_snr() -> None:
+    output = "\n".join(
+        [
+            "[openturbo] shadow_compare layer=8 status=success node=kq-0 active_rows=2 raw_top_match=1 fwht_top_match=1 first_row=0 shadow_first=1.0 raw_first=0.1 fwht_first=0.9 shadow_top_row=0 shadow_top=1.0 raw_top_row=0 raw_top=0.1 fwht_top_row=0 fwht_top=0.9 raw_mae=0.2 raw_max_abs_error=0.3 fwht_mae=0.05 fwht_max_abs_error=0.07 fwht_mean_scale_ratio=1.02",
+            "[openturbo] shadow_snr layer=8 status=success node=kq-0 fwht_signal_power=4.0 fwht_noise_power=0.04 fwht_snr_db=20.0 signal_retention=99.009903 legacy_noise_power=0.16 legacy_snr_db=13.979400 legacy_signal_retention=96.153847",
+            "[openturbo] shadow_compare layer=16 status=success node=kq-1 active_rows=2 raw_top_match=1 fwht_top_match=1 first_row=0 shadow_first=1.1 raw_first=0.2 fwht_first=1.0 shadow_top_row=0 shadow_top=1.1 raw_top_row=0 raw_top=0.2 fwht_top_row=0 fwht_top=1.0 raw_mae=0.3 raw_max_abs_error=0.4 fwht_mae=0.08 fwht_max_abs_error=0.1 fwht_mean_scale_ratio=0.98",
+            "[openturbo] shadow_snr layer=16 status=success node=kq-1 fwht_signal_power=5.0 fwht_noise_power=0.05 fwht_snr_db=20.0 signal_retention=99.009903 legacy_noise_power=0.25 legacy_snr_db=13.010300 legacy_signal_retention=95.238098",
+        ]
+    )
+
+    rows = probe_runner.collect_benchmark_rows(output, "P1")
+
+    assert len(rows) == 2
+    assert rows[0]["prompt"] == "P1"
+    assert rows[0]["layer"] == 8
+    assert rows[0]["fwht_mae"] == pytest.approx(0.05)
+    assert rows[0]["signal_retention"] == pytest.approx(99.009903)
+    assert rows[1]["layer"] == 16
+
+
+def test_format_benchmark_report_contains_summary() -> None:
+    report = probe_runner.format_benchmark_report(
+        [
+            {"prompt": "P1", "layer": 0, "fwht_mae": 100.0, "fwht_mean_scale_ratio": 1.01, "fwht_top_match": 1, "signal_retention": 99.5, "fwht_snr_db": 23.0},
+            {"prompt": "P2", "layer": 8, "fwht_mae": 200.0, "fwht_mean_scale_ratio": 0.99, "fwht_top_match": 1, "signal_retention": 99.0, "fwht_snr_db": 22.0},
+        ],
+        "0,8",
+    )
+
+    assert "Overall average retention" in report
+    assert "| P1 | 0 | 99.50 | 23.00 | 100.00 | 1.010 | 1 |" in report

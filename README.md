@@ -220,6 +220,22 @@ That single script will:
 6. Download the default `Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf` model.
 7. Run `llama-eval-callback` and print the `cpy_k probe`, `shadow_encode`, `shadow_read`, `shadow_score`, and `shadow_compare` result lines.
 
+If you want a benchmark table across multiple prompts and deeper layers instead of one first-layer sample:
+
+```powershell
+.venv\Scripts\python.exe scripts\run_llama_cpp_k_cache_probe.py --benchmark
+```
+
+The benchmark mode reuses one configured downstream build, runs a default multi-prompt suite, tracks layers `0,8,16,24,31`, and writes a markdown table to `benchmarks/llama31_shadow_benchmark.md`.
+
+If you want to prepare the experimental packed-score-path handoff while keeping the probe-only behavior:
+
+```powershell
+.venv\Scripts\python.exe scripts\run_llama_cpp_k_cache_probe.py --packed-score-path
+```
+
+That enables the downstream `OPENTURBO_EXPERIMENTAL_PACKED_SCORE_PATH` compile definition and emits a `shadow_packed_path` status line whenever the score path has enough information to attempt a packed attention-score swap.
+
 If you run the script with no arguments, it will create a local `llama` directory in the current working directory and write the scaffold there:
 
 ```powershell
@@ -274,6 +290,8 @@ That patch set does two additional things during downstream execution:
 
 At the current stage this remains a probe path, not a full attention replacement. The read-side path now uses exact mask-derived rows, and the score path is still experimental logging rather than a substitution for llama.cpp attention. The default estimator now uses box-center geometry, encoder-side block-scale calibration, and box-center residual statistics, while `shadow_legacy` preserves the older corner reconstruction as a side-by-side diagnostic. The probe also emits `shadow_snr`, which turns the FWHT-domain comparison into a single retention-style metric suitable for README benchmarking. On the current Llama-3.1-8B downstream probe, the calibrated path reports `fwht_mae ~= 396`, `fwht_mean_scale_ratio ~= 1.083`, `fwht_snr_db ~= 24.53`, and `signal_retention ~= 99.65%`.
 
+When benchmark mode is enabled, the generated callback honors `OPENTURBO_SHADOW_LAYER_FILTER` so the same binary can sample deeper layers without flooding the default one-shot probe output.
+
 ## Current Validation
 
 The repo is currently validated at three levels:
@@ -289,6 +307,7 @@ The repo is currently validated at three levels:
 	* `shadow_snr`
 	* `shadow_components`
 	* `shadow_legacy`
+* Optional benchmark output via `benchmarks/llama31_shadow_benchmark.md` when the probe runner is invoked with `--benchmark`.
 
 The generated files are intentionally small and explicit. They wrap real `ggml_tensor` objects through `include/openturbo/ggml_downstream.hpp`, but you still need to connect them to the actual llama.cpp call site that owns the K/V cache tensors.
 
