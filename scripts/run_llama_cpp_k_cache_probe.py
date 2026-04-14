@@ -148,7 +148,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--packed-score-path",
         action="store_true",
-        help="Enable the experimental packed-score-path compile definition in the downstream eval-callback example.",
+        default=True,
+        help="Enable the experimental packed-score-path compile definition in the downstream eval-callback example. Default: enabled.",
+    )
+    parser.add_argument(
+        "--no-packed-score-path",
+        dest="packed_score_path",
+        action="store_false",
+        help="Disable the experimental packed-score-path compile definition.",
     )
     parser.add_argument(
         "--benchmark",
@@ -169,6 +176,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--layer-filter",
         default=DEFAULT_BENCHMARK_LAYERS,
         help="Comma-separated layer indices to track during benchmark runs. Default: 0,8,16,24,31.",
+    )
+    parser.add_argument(
+        "--force-bindings-refresh",
+        action="store_true",
+        help="Force a rebuild of the local OpenTurbo CUDA bindings before configuring the downstream probe.",
     )
     return parser
 
@@ -194,12 +206,66 @@ def resolve_cmake_executable(explicit_cmake: Path | None) -> str:
     raise FileNotFoundError("Could not find 'cmake' on PATH. Pass --cmake with an explicit executable path.")
 
 
+def resolve_windows_cuda_paths() -> tuple[Path, Path] | None:
+    nvcc_candidates: list[Path] = []
+    if os.name != "nt":
+        return None
+
+    if os.environ.get("CUDA_PATH"):
+        nvcc_candidates.append(Path(os.environ["CUDA_PATH"]) / "bin" / "nvcc.exe")
+
+    nvcc_on_path = shutil.which("nvcc")
+    if nvcc_on_path:
+        nvcc_candidates.append(Path(nvcc_on_path))
+
+    nvcc_candidates.append(Path("C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v12.6/bin/nvcc.exe"))
+
+    for nvcc_path in nvcc_candidates:
+        if nvcc_path.exists():
+            return nvcc_path.resolve(), nvcc_path.resolve().parent.parent
+
+    return None
+
+
+def clear_cmake_cache(build_dir: Path) -> None:
+    cache_file = build_dir / "CMakeCache.txt"
+    cmake_files_dir = build_dir / "CMakeFiles"
+
+    if cache_file.exists():
+        cache_file.unlink()
+
+    if cmake_files_dir.exists():
+        shutil.rmtree(cmake_files_dir)
+
+
 def refresh_openturbo_bindings(openturbo_root: Path) -> None:
     install_script = openturbo_root / "scripts" / "install_cuda_bindings.bat"
     if not install_script.exists():
         raise FileNotFoundError(f"Could not find OpenTurbo install script: {install_script}")
 
     run_command(["cmd", "/c", str(install_script)], cwd=openturbo_root)
+
+
+def existing_bindings_healthy(openturbo_root: Path) -> bool:
+    probe_code = """
+from pathlib import Path
+import openturbo._openturbo_cuda as native
+
+module_path = Path(native.__file__).resolve()
+print(module_path)
+""".strip()
+
+    completed = subprocess.run(
+        [sys.executable, "-c", probe_code],
+        cwd=str(openturbo_root),
+        text=True,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        return False
+
+    module_path = Path(completed.stdout.strip())
+    return module_path.exists()
 
 
 def generate_scaffold(output_root: Path, force: bool) -> None:
@@ -220,13 +286,26 @@ def configure_probe_build(
     packed_score_path: bool,
     enable_cuda: bool,
 ) -> None:
-    run_command(
+    command = [
+        cmake_exe,
+        "-S",
+        str(llama_root),
+        "-B",
+        str(build_dir),
+    ]
+
+    if os.name == "nt" and enable_cuda:
+        cuda_paths = resolve_windows_cuda_paths()
+        clear_cmake_cache(build_dir)
+        command.extend(["-G", "Visual Studio 17 2022", "-A", "x64"])
+        if cuda_paths is not None:
+            nvcc_path, toolkit_root = cuda_paths
+            command.extend(["-T", f"cuda={toolkit_root}"])
+            command.append(f"-DCUDAToolkit_ROOT={toolkit_root}")
+            command.append(f"-DCMAKE_CUDA_COMPILER={nvcc_path}")
+
+    command.extend(
         [
-            cmake_exe,
-            "-S",
-            str(llama_root),
-            "-B",
-            str(build_dir),
             f"-DGGML_CUDA={'ON' if enable_cuda else 'OFF'}",
             f"-DOPENTURBO_EXPERIMENTAL_K_CACHE_PROBE=ON",
             f"-DOPENTURBO_EXPERIMENTAL_K_CACHE_SHADOW_ENCODE=ON",
@@ -234,6 +313,8 @@ def configure_probe_build(
             f"-DOPENTURBO_ROOT={openturbo_root}",
         ]
     )
+
+    run_command(command)
 
 
 def build_probe_target(cmake_exe: str, build_dir: Path, config: str, target: str) -> None:
@@ -442,7 +523,11 @@ def main() -> int:
     repo_root = Path(__file__).resolve().parent.parent
     cmake_exe = resolve_cmake_executable(args.cmake)
     openturbo_root = (args.openturbo_root or repo_root).resolve()
-    refresh_openturbo_bindings(openturbo_root)
+    if args.force_bindings_refresh or not existing_bindings_healthy(openturbo_root):
+        print("Refreshing OpenTurbo CUDA bindings", flush=True)
+        refresh_openturbo_bindings(openturbo_root)
+    else:
+        print("Reusing existing OpenTurbo CUDA bindings", flush=True)
 
     llama_root = resolve_llama_root(args)
     if llama_root is None:

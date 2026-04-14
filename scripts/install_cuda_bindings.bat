@@ -6,7 +6,11 @@ set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 set "VSINSTALL="
 set "VSDEVCMD="
 set "NVCC="
+set "CUDA_TOOLKIT_ROOT="
 set "PYTHON=%WORKSPACE_DIR%\.venv\Scripts\python.exe"
+set "HAS_CL="
+set "HOST_CL="
+set "NINJA="
 
 if defined CUDA_PATH if exist "%CUDA_PATH%\bin\nvcc.exe" (
     set "NVCC=%CUDA_PATH%\bin\nvcc.exe"
@@ -49,16 +53,68 @@ if not exist "%NVCC%" (
     exit /b 1
 )
 
+for %%I in ("%NVCC%") do set "CUDA_BIN_DIR=%%~dpI"
+for %%I in ("%CUDA_BIN_DIR%..") do set "CUDA_TOOLKIT_ROOT=%%~fI"
+
 if not exist "%PYTHON%" (
     set "PYTHON=python"
 )
 
-call "%VSDEVCMD%" -no_logo -arch=amd64 -host_arch=amd64
-if errorlevel 1 exit /b %errorlevel%
+where cl >nul 2>nul
+if not errorlevel 1 (
+    set "HAS_CL=1"
+)
+
+if not defined HAS_CL (
+    call "%VSDEVCMD%" -no_logo -arch=amd64 -host_arch=amd64
+    if errorlevel 1 exit /b %errorlevel%
+)
+
+for /f "delims=" %%I in ('where cl 2^>nul') do (
+    set "HOST_CL=%%I"
+    goto :found_cl
+)
+
+:found_cl
+
+for /f "delims=" %%I in ('where ninja 2^>nul') do (
+    set "NINJA=%%I"
+    goto :found_ninja
+)
+
+if not defined NINJA if defined VSINSTALL if exist "%VSINSTALL%\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe" (
+    set "NINJA=%VSINSTALL%\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe"
+)
+
+if not defined NINJA if exist "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe" (
+    set "NINJA=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe"
+)
+
+:found_ninja
 
 set "CUDACXX=%NVCC%"
-set "CMAKE_GENERATOR=Ninja"
-set "CMAKE_ARGS=-DCMAKE_CUDA_ARCHITECTURES=89"
+set "CUDAHOSTCXX=%HOST_CL%"
+set "CMAKE_GENERATOR_PLATFORM="
+set "CMAKE_GENERATOR_TOOLSET="
+set "CMAKE_MAKE_PROGRAM="
+
+if defined HOST_CL if defined NINJA (
+    set "CMAKE_GENERATOR=Ninja"
+    set "CMAKE_MAKE_PROGRAM=%NINJA%"
+) else (
+    set "CMAKE_GENERATOR=Visual Studio 17 2022"
+    set "CMAKE_GENERATOR_PLATFORM=x64"
+    if defined CUDA_TOOLKIT_ROOT (
+        set "CMAKE_GENERATOR_TOOLSET=cuda=%CUDA_TOOLKIT_ROOT%"
+    )
+)
+
+set "CMAKE_ARGS=-DCMAKE_CUDA_ARCHITECTURES=89 -DCUDAToolkit_ROOT=%CUDA_TOOLKIT_ROOT%"
+
+echo Using CMake generator: %CMAKE_GENERATOR%
+if defined CMAKE_MAKE_PROGRAM echo Using make program: %CMAKE_MAKE_PROGRAM%
+if defined HOST_CL echo Using host compiler: %HOST_CL%
+if defined CUDA_TOOLKIT_ROOT echo Using CUDA toolkit root: %CUDA_TOOLKIT_ROOT%
 
 pushd "%WORKSPACE_DIR%"
 "%PYTHON%" -m pip install -e .[bindings]
