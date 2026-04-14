@@ -12,6 +12,7 @@ What exists today:
 * A scan kernel that estimates query-cache dot products from packed headers, including the residual correction term.
 * CPU reference paths and smoke tests for the encoder and scan logic, with the box-center scan geometry now promoted into the default estimator and the legacy corner geometry retained as an explicit comparison path.
 * A GQA-aware downstream probe path that matches Llama-3 style grouped-query attention and memory layout instead of sampling a single representative head.
+* An experimental downstream packed-score path with a persistent CUDA sidecar that is populated from observed K-cache writes instead of re-encoding the whole cache each decode step.
 * A Python extension build path using CMake and scikit-build-core.
 * A versioned native C ABI, a concrete head-local ggml-style adapter contract, a llama-facing request bridge, and a KV slicing shim for dense multi-head storage.
 
@@ -101,6 +102,11 @@ Requirements:
 * CUDA Toolkit available locally.
 * Visual Studio 2022 Build Tools with 64-bit C++ tools.
 * A Python environment, typically the local `.venv`.
+
+Recommended shell on Windows:
+
+* Use Developer PowerShell for VS 2022 when working on downstream CUDA builds.
+* `scripts\install_cuda_bindings.bat` now chooses between Ninja and Visual Studio generators automatically, but it still assumes a working MSVC + CUDA toolchain.
 
 Install the editable Python package with CUDA bindings:
 
@@ -215,10 +221,10 @@ That single script will:
 1. Bootstrap or reuse a local llama.cpp checkout.
 2. Generate the OpenTurbo scaffold.
 3. Apply the experimental `cpy_k()` probe patch and the eval-callback shadow encode patch.
-4. Refresh the local OpenTurbo editable install so the downstream build links against the current native library.
+4. Reuse the current OpenTurbo CUDA bindings when they already import cleanly, or rebuild them on demand when `--force-bindings-refresh` is passed.
 5. Configure and build a probe-enabled downstream tree.
 6. Download the default `Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf` model.
-7. Run `llama-eval-callback` and print the `cpy_k probe`, `shadow_encode`, `shadow_read`, `shadow_score`, and `shadow_compare` result lines.
+7. Run `llama-eval-callback` and print the probe diagnostics, including `cpy_k probe`, `shadow_encode`, `shadow_read`, `shadow_score`, `shadow_compare`, `shadow_snr`, `shadow_components`, and `shadow_legacy`.
 
 If you want a benchmark table across multiple prompts and deeper layers instead of one first-layer sample:
 
@@ -228,13 +234,19 @@ If you want a benchmark table across multiple prompts and deeper layers instead 
 
 The benchmark mode reuses one configured downstream build, runs a default multi-prompt suite, tracks layers `0,8,16,24,31`, and writes a markdown table to `benchmarks/llama31_shadow_benchmark.md`.
 
-If you want to prepare the experimental packed-score-path handoff while keeping the probe-only behavior:
+The experimental packed-score-path is now enabled by default in the probe runner. If you want to disable it and keep the older probe-only compile path:
 
 ```powershell
-.venv\Scripts\python.exe scripts\run_llama_cpp_k_cache_probe.py --packed-score-path
+.venv\Scripts\python.exe scripts\run_llama_cpp_k_cache_probe.py --no-packed-score-path
 ```
 
-That enables the downstream `OPENTURBO_EXPERIMENTAL_PACKED_SCORE_PATH` compile definition and emits a `shadow_packed_path` status line whenever the score path has enough information to attempt a packed attention-score swap.
+When left enabled, the runner configures the downstream `OPENTURBO_EXPERIMENTAL_PACKED_SCORE_PATH` compile definition and emits a `shadow_packed_path` status line whenever the score path has enough information to attempt a packed attention-score swap.
+
+If you need to force a local CUDA binding rebuild before the probe run, use:
+
+```powershell
+.venv\Scripts\python.exe scripts\run_llama_cpp_k_cache_probe.py --force-bindings-refresh
+```
 
 If you run the script with no arguments, it will create a local `llama` directory in the current working directory and write the scaffold there:
 
@@ -288,7 +300,9 @@ That patch set does two additional things during downstream execution:
 6. `shadow_components`: splits the current packed estimator into its quadrant main term and residual-correction term so remaining calibration failures can be attributed to the right part of the approximation.
 7. `shadow_legacy`: logs the previous corner-based estimator as a comparison line after the box-center geometry becomes the real scan path.
 
-At the current stage this remains a probe path, not a full attention replacement. The read-side path now uses exact mask-derived rows, and the score path is still experimental logging rather than a substitution for llama.cpp attention. The default estimator now uses box-center geometry, encoder-side block-scale calibration, and box-center residual statistics, while `shadow_legacy` preserves the older corner reconstruction as a side-by-side diagnostic. The probe also emits `shadow_snr`, which turns the FWHT-domain comparison into a single retention-style metric suitable for README benchmarking. On the current Llama-3.1-8B downstream probe, the calibrated path reports `fwht_mae ~= 396`, `fwht_mean_scale_ratio ~= 1.083`, `fwht_snr_db ~= 24.53`, and `signal_retention ~= 99.65%`.
+At the current stage this remains an experimental integration path, not a production attention replacement. The read-side path now uses exact mask-derived rows, the packed-score branch reads from a persistent sidecar populated by observed `SET_ROWS` K-cache writes, and unsupported cases still fall back to the dense llama.cpp path. The default estimator now uses box-center geometry, encoder-side block-scale calibration, and box-center residual statistics, while `shadow_legacy` preserves the older corner reconstruction as a side-by-side diagnostic. The probe also emits `shadow_snr`, which turns the FWHT-domain comparison into a single retention-style metric suitable for README benchmarking. On the current Llama-3.1-8B downstream probe, the calibrated path reports `fwht_mae ~= 396`, `fwht_mean_scale_ratio ~= 1.083`, `fwht_snr_db ~= 24.53`, and `signal_retention ~= 99.65%`.
+
+The current multi-prompt benchmark snapshot in `benchmarks/llama31_shadow_benchmark.md` keeps `Top Match = 1` across the sampled layers and prompts while materially reducing the earlier Layer 8 scale-ratio instability.
 
 When benchmark mode is enabled, the generated callback honors `OPENTURBO_SHADOW_LAYER_FILTER` so the same binary can sample deeper layers without flooding the default one-shot probe output.
 
@@ -308,6 +322,12 @@ The repo is currently validated at three levels:
 	* `shadow_components`
 	* `shadow_legacy`
 * Optional benchmark output via `benchmarks/llama31_shadow_benchmark.md` when the probe runner is invoked with `--benchmark`.
+
+For the current Windows-first downstream workflow, the most useful operator loop is:
+
+1. Run `scripts\install_cuda_bindings.bat` once after native OpenTurbo changes, or pass `--force-bindings-refresh` when you explicitly want a rebuild.
+2. Re-run `scripts\run_llama_cpp_k_cache_probe.py` for downstream validation.
+3. Use `--benchmark` when you need a broader quality snapshot instead of a single prompt/layer probe.
 
 The generated files are intentionally small and explicit. They wrap real `ggml_tensor` objects through `include/openturbo/ggml_downstream.hpp`, but you still need to connect them to the actual llama.cpp call site that owns the K/V cache tensors.
 

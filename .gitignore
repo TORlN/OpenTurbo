@@ -20,6 +20,7 @@ ENV/
 # IDEs
 .vscode/
 .idea/
+.vs/
 
 # OS files
 .DS_Store
@@ -28,3 +29,14 @@ ENV/
 *.exe
 *.exp
 *.lib
+*.dll
+*.pyd
+*.pdb
+*.ilk
+*.obj
+
+# Local tooling caches
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/

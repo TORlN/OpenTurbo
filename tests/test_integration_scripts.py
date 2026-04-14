@@ -315,3 +315,30 @@ def test_format_benchmark_report_contains_summary() -> None:
 
     assert "Overall average retention" in report
     assert "| P1 | 0 | 99.50 | 23.00 | 100.00 | 1.010 | 1 |" in report
+
+
+def test_existing_bindings_healthy_returns_true_for_importable_module(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Completed:
+        returncode = 0
+        stdout = "A:/OpenTurbo/.venv/Lib/site-packages/openturbo/_openturbo_cuda.cp313-win_amd64.pyd\n"
+
+    monkeypatch.setattr(probe_runner.subprocess, "run", lambda *args, **kwargs: Completed())
+    monkeypatch.setattr(probe_runner.Path, "exists", lambda self: True)
+
+    assert probe_runner.existing_bindings_healthy(REPO_ROOT) is True
+
+
+def test_existing_bindings_healthy_returns_false_when_import_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Completed:
+        returncode = 1
+        stdout = ""
+
+    monkeypatch.setattr(probe_runner.subprocess, "run", lambda *args, **kwargs: Completed())
+
+    assert probe_runner.existing_bindings_healthy(REPO_ROOT) is False
+
+
+def test_probe_runner_parser_exposes_force_bindings_refresh_flag() -> None:
+    args = probe_runner.build_arg_parser().parse_args(["--force-bindings-refresh"])
+
+    assert args.force_bindings_refresh is True
